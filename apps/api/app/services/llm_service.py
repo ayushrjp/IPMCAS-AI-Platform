@@ -13,11 +13,12 @@ SYSTEM_PROMPT = """You are IPMCAS AI, an expert Network Intelligence Assistant s
 PRIMARY INSTRUCTIONS:
 1. THE USER'S QUESTION IS YOUR PRIMARY TASK. Answer the user's specific question directly and concisely.
 2. DO NOT output a generic diagnostic template or fixed measurement summary unless the user explicitly asks for one.
-3. Use the provided NETWORK CONTEXT (Current Measurement & Historical Baseline) strictly as evidence/context to answer the user's specific question.
+3. DO NOT begin your response with "Your test measured..." or repeat a fixed measurement summary sentence unless the user specifically asks for a test overview.
+4. Use the provided NETWORK CONTEXT (Current Measurement & Historical Baseline) strictly as evidence/context to answer the user's specific question.
 
 CRITICAL FACTUAL GROUNDING & SAFETY RULES:
 - Clearly distinguish between:
-  * MEASURED FACT: Explicit values from the current measurement (e.g., "Your test measured 1.06 Mbps download, 486.33 ms latency, and 75.91 ms jitter.").
+  * MEASURED FACT: Explicit values from current test (e.g., "download was 1.06 Mbps, latency was 486.33 ms").
   * INTERPRETATION: Logical assessment of metrics (e.g., "486.33 ms latency indicates high delay for real-time applications.").
   * POSSIBLE CAUSE: Mentioned ONLY as potential possibilities to check (e.g., "Possible causes include temporary network congestion or local Wi-Fi interference.").
   * UNKNOWN: Explicitly state when data is missing or inconclusive (e.g., "The available measurements do not establish the exact cause.").
@@ -132,9 +133,9 @@ def fallback_chat_response(
         rec_bullets.append("3. **Rerun Test at Different Times**: Perform follow-up tests to check whether low speed is tied to peak hours.")
         rec_bullets.append("4. **Test Alternate Server Nodes**: Select a different server node in Settings to check path routing.")
 
-        meas_summary = f"Your current test measured **{dl:.2f} Mbps download**, **{ul:.2f} Mbps upload**, **{lat:.2f} ms latency**, and **{jit:.2f} ms jitter**."
+        meas_note = f"*Measured Context: {dl:.2f} Mbps download, {ul:.2f} Mbps upload, {lat:.2f} ms latency, {jit:.2f} ms jitter.*"
         cause_note = "The available measurements do not establish the exact technical cause of performance limits."
-        return f"Based on your test ({meas_summary}), here are practical steps to improve your connection:\n\n" + "\n".join(rec_bullets) + f"\n\n{cause_note}"
+        return f"Here are practical, evidence-based recommendations to improve your connection performance:\n\n" + "\n".join(rec_bullets) + f"\n\n{meas_note}\n{cause_note}"
 
     # 2. ETHERNET / WI-FI SPECIFIC INQUIRIES
     if any(k in q_lower for k in ["ethernet", "wifi", "wi-fi", "wireless", "cable"]):

@@ -39,7 +39,7 @@ class TestLLMService(unittest.IsolatedAsyncioTestCase):
 
     def test_question_intent_give_suggestions(self):
         resp = fallback_chat_response("Give suggestions to improve speed", self.sample_measurement, self.sample_history)
-        self.assertIn("practical steps to improve your connection", resp.lower())
+        self.assertIn("practical, evidence-based recommendations", resp.lower())
         self.assertIn("ethernet", resp.lower())
         self.assertNotIn("gaming will likely feel laggy", resp.lower())
 
