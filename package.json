@@ -1,0 +1,15 @@
+{
+  "name": "ipmcas-ai-platform",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build:engine": "npm run build --workspace=@ipmcas/measurement-engine",
+    "build:web": "npm run build --workspace=ipmcas-web",
+    "build": "npm run build --workspace=@ipmcas/measurement-engine && npm run build --workspace=ipmcas-web",
+    "test": "node --test tests/unit/*.js"
+  }
+}
