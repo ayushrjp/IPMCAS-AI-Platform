@@ -152,6 +152,9 @@ async def assistant_chat(
         t_server = server_obj.get("name") if isinstance(server_obj, dict) else "IPMCAS Primary Node"
 
         # Comparison vs Historical Baseline
+        dl_pct = round(((t_dl - avg_dl) / avg_dl) * 100, 1) if avg_dl > 0 else 0.0
+        lat_diff = round(t_lat - avg_lat, 1) if avg_lat > 0 else 0.0
+
         msg_lower = payload.message.lower()
         is_detailed_request = any(k in msg_lower for k in ["detail", "full report", "comprehensive", "breakdown", "step by step"])
 
