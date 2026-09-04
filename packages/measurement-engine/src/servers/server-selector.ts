@@ -1,3 +1,5 @@
+declare const process: any;
+
 import { ServerNode, LatencyMetrics } from '../types';
 import { getMonotonicTimeMs, calculateLatencyStats, calculateRFC3550Jitter } from '../utils/math';
 
