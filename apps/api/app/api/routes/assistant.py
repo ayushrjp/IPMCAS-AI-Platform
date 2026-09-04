@@ -297,8 +297,6 @@ async def assistant_chat(
                 "Compare this test with my recent average.",
                 "How can I improve my connection?"
             ]
-        }ection?"
-            ]
         }
 
     # ========================================================
