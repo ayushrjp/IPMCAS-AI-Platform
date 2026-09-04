@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o"
     
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "https://ipmcas-web.onrender.com"]
     
     @validator("CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
