@@ -167,68 +167,48 @@ async def assistant_chat(
             )
         elif not is_detailed_request:
             # Concise 3-6 sentence diagnostic response structure
-            # 1. DIRECT ANSWER & CURRENT EVIDENCE
-            if "download" in msg_lower and any(k in msg_lower for k in ["low", "slow", "poor", "drop"]):
-                if avg_dl > 0 and t_dl >= (avg_dl * 0.9):
-                    direct_ans = f"Your download speed is **not low** in this test."
-                else:
-                    direct_ans = f"Your download speed (**{t_dl} Mbps**) was reduced during this test."
-            elif "upload" in msg_lower and any(k in msg_lower for k in ["low", "slow", "poor", "zero", "0"]):
-                if t_ul == 0.0:
-                    direct_ans = f"Your upload result was **0 Mbps**, which is abnormal."
-                else:
-                    direct_ans = f"Your upload throughput recorded **{t_ul} Mbps** in this test."
-            elif "latency" in msg_lower or "ping" in msg_lower:
-                direct_ans = f"Your round-trip latency recorded **{t_lat} ms** with **{t_jit} ms** RFC 3550 jitter."
-            else:
-                direct_ans = f"In this current test, you recorded **{t_dl} Mbps download**, **{t_ul} Mbps upload**, **{t_lat} ms latency**, and **{t_jit} ms jitter**."
+            # 1. DIRECT ANSWER & MEASURED FACTS
+            direct_ans = f"Your test measured **{t_dl} Mbps download**, **{t_ul} Mbps upload**, **{t_lat} ms latency**, and **{t_jit} ms jitter**."
 
-            # 2. HISTORICAL COMPARISON & EVIDENCE
+            # 2. RESPONSIVENESS (LATENCY & JITTER EVALUATION)
+            if t_lat > 150.0 or t_jit > 30.0:
+                resp_text = f" The high latency (**{t_lat} ms**) and jitter (**{t_jit} ms**) indicate degraded responsiveness during this test."
+            else:
+                resp_text = f" The latency (**{t_lat} ms**) and jitter (**{t_jit} ms**) indicate stable responsiveness during this test."
+
+            # 3. HISTORICAL BASELINE COMPARISON (IF AVAILABLE)
             if total_tests > 0 and avg_dl > 0:
-                if dl_pct > 2.0:
-                    comp_text = f" You recorded **{t_dl} Mbps**, which is **{dl_pct}% above** your recent average of **{avg_dl} Mbps**."
-                elif dl_pct < -2.0:
-                    comp_text = f" You recorded **{t_dl} Mbps**, which is **{abs(dl_pct)}% below** your recent average of **{avg_dl} Mbps**."
+                if dl_pct < -15.0:
+                    comp_text = f" Your download speed of **{t_dl} Mbps** is **{abs(dl_pct)}% below** your recent average of **{avg_dl} Mbps**."
+                elif dl_pct > 15.0:
+                    comp_text = f" Your download speed of **{t_dl} Mbps** is **{dl_pct}% above** your recent average of **{avg_dl} Mbps**."
                 else:
-                    comp_text = f" You recorded **{t_dl} Mbps**, which is consistent with your recent average of **{avg_dl} Mbps**."
+                    comp_text = f" Your download speed of **{t_dl} Mbps** is consistent with your recent average of **{avg_dl} Mbps**."
             else:
-                comp_text = f" You recorded **{t_dl} Mbps download**."
+                comp_text = ""
 
-            evidence_text = f" Your **{t_lat} ms** latency and **{t_jit} ms** jitter also indicate responsiveness during this test."
-
-            # 3. SPECIAL ABNORMAL METRIC SAFEGUARD (e.g. 0 Mbps upload check)
+            # 4. SPECIAL ABNORMAL METRIC SAFEGUARD (0 Mbps Upload)
             abnormal_text = ""
             if t_ul == 0.0:
                 abnormal_text = (
-                    f"\n\nHowever, your upload result was **0 Mbps**, which is abnormal and should be investigated separately. "
-                    f"This may indicate that the upload portion of the measurement did not complete successfully rather than an actual 0 Mbps connection speed."
+                    f" The 0 Mbps upload result should be treated as an incomplete or failed upload measurement rather than a confirmed 0 Mbps connection speed."
                 )
 
-            # 4. POSSIBLE CAUSE / INTERPRETATION (Facts vs Inferences vs Unknowns)
-            if t_dl < (avg_dl * 0.8) and t_lat > (avg_lat + 5.0):
+            # 5. POSSIBLE CAUSE / INTERPRETATION (Facts vs Inferences vs Unknowns)
+            if t_dl < 5.0 or (avg_dl > 0 and t_dl < avg_dl * 0.8):
                 cause_text = (
-                    f"\n\n**Likely Explanation**: Reduced throughput combined with elevated latency (**{t_lat} ms**) indicates network queuing delay (bufferbloat) or physical link interference. "
-                    f"*(Note: Browser probers cannot isolate whether router bufferbloat, Wi-Fi channel contention, or ISP backhaul congestion caused the delay).* "
+                    f" The available measurements do not establish the exact technical cause of the low download speed. "
+                    f"Possible causes include temporary network congestion, an unstable network path, server-side limitations, or environmental factors, but additional testing is required to distinguish them."
                 )
-            elif t_dl < (avg_dl * 0.8) and t_lat <= (avg_lat * 1.25):
+            else:
                 cause_text = (
-                    f"\n\n**Likely Explanation**: Download throughput was reduced while latency (**{t_lat} ms**) remained clean. This is typical of local background network activity or TCP stream concurrency limits. "
-                    f"*(Note: Browser probers cannot determine whether local background apps, Wi-Fi contention, or remote server load caused the reduction).* "
+                    f" The available measurements show steady throughput performance for this session."
                 )
-            elif t_dl > (avg_dl * 1.15):
-                cause_text = f"\n\n**Likely Explanation**: Low network contention and optimal TCP window scaling allowed your connection to achieve near-peak link throughput during this session."
-            else:
-                cause_text = f"\n\n**Interpretation**: Round-trip latency and jitter operated within your expected baseline parameters."
 
-            # 5. SHORT ACTIONABLE RECOMMENDATION
-            if t_ul == 0.0:
-                rec_text = f"\n\n**Recommendation**: Rerun the test and check whether the upload measurement completes successfully."
-            elif t_dl < (avg_dl * 0.8):
-                rec_text = f"\n\n**Recommendation**: Check for active background data transfers on local devices, experiment with 8 parallel streams in Settings, or re-test on 5GHz Wi-Fi."
-            else:
-                rec_text = f"\n\n**Recommendation**: Re-test periodically during peak hours to track baseline stability."
+            # 6. ACTIONABLE RECOMMENDATION
+            rec_text = f" Rerun the test and compare multiple valid measurements."
 
-            answer = f"{direct_ans}{comp_text}{evidence_text}{abnormal_text}{cause_text}{rec_text}"
+            answer = f"{direct_ans}{resp_text}{abnormal_text}{comp_text}{cause_text}{rec_text}"
 
         else:
             # Detailed Markdown Analysis (only when explicitly requested)
