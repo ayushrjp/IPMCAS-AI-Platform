@@ -235,23 +235,27 @@ export default function AIAssistantPanel() {
     try {
       let accumulatedText = '';
 
-      await api.askAssistantStream(
-        promptText,
-        (chunk: string) => {
-          accumulatedText += chunk;
-          setMessages(prev =>
-            prev.map(msg =>
-              msg.id === assistantMsgId ? { ...msg, text: accumulatedText } : msg
-            )
-          );
-        },
-        historyPayload,
-        ctx,
-        targetId || undefined
-      );
+      try {
+        await api.askAssistantStream(
+          promptText,
+          (chunk: string) => {
+            accumulatedText += chunk;
+            setMessages(prev =>
+              prev.map(msg =>
+                msg.id === assistantMsgId ? { ...msg, text: accumulatedText } : msg
+              )
+            );
+          },
+          historyPayload,
+          ctx,
+          targetId || undefined
+        );
+      } catch (streamErr) {
+        console.warn('SSE streaming endpoint unreachable, falling back to standard AI chat endpoint:', streamErr);
+      }
 
       if (!accumulatedText.trim()) {
-        // Fallback to non-streaming if stream produced no output
+        // Fallback to non-streaming if stream produced no output or endpoint was 404
         const res = await api.askAssistant(promptText, ctx, targetId || undefined, historyPayload);
         const finalAnswer = res.answer || res.observation || 'Analysis complete.';
         setMessages(prev =>

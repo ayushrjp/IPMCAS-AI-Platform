@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Optional
 from pydantic import AnyHttpUrl, validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "openai"
     LLM_API_KEY: str = "placeholder-key"
     LLM_MODEL: str = "gpt-4o"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: Optional[str] = None
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "https://ipmcas-web.onrender.com"]

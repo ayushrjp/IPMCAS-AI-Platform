@@ -24,14 +24,24 @@ CRITICAL FACTUAL GROUNDING RULES:
 
 def get_openai_client() -> Optional[AsyncOpenAI]:
     """Retrieves an initialized AsyncOpenAI client if a valid key is set."""
-    api_key = settings.LLM_API_KEY
-    if not api_key or api_key in ["placeholder-key", "your_openai_api_key_here", "sk-placeholder"]:
-        api_key = os.getenv("OPENAI_API_KEY")
-    
+    api_key = (
+        os.getenv("OPENAI_API_KEY") or
+        getattr(settings, "OPENAI_API_KEY", None) or
+        settings.LLM_API_KEY
+    )
     if not api_key or api_key in ["placeholder-key", "your_openai_api_key_here", "sk-placeholder"]:
         return None
     
     return AsyncOpenAI(api_key=api_key)
+
+def get_model_name() -> str:
+    """Returns configured OpenAI model name."""
+    return (
+        os.getenv("OPENAI_MODEL") or
+        getattr(settings, "OPENAI_MODEL", None) or
+        settings.LLM_MODEL or
+        "gpt-4o"
+    )
 
 def build_network_context(
     current_measurement: Optional[Dict[str, Any]] = None,
@@ -158,7 +168,7 @@ async def generate_chat_response(
         
     try:
         response = await client.chat.completions.create(
-            model=settings.LLM_MODEL,
+            model=get_model_name(),
             messages=formatted_messages,
             temperature=0.3,
             max_tokens=500
@@ -196,7 +206,7 @@ async def generate_chat_response_stream(
 
     try:
         stream = await client.chat.completions.create(
-            model=settings.LLM_MODEL,
+            model=get_model_name(),
             messages=formatted_messages,
             temperature=0.3,
             max_tokens=500,
