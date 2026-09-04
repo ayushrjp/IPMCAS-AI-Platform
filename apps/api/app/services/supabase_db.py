@@ -213,3 +213,110 @@ async def get_user_measurement_history(user_id: str, limit: int = 20, page: int 
         else:
             logger.error(f"Failed to query measurement history from Supabase: {response.status_code} {response.text}")
             return {"page": page, "limit": limit, "total_records": 0, "data": []}
+
+async def get_measurement_by_id(measurement_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches a specific measurement result by ID or Session ID, validating user ownership.
+    """
+    headers = get_headers()
+    url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/measurement_results?or=(id.eq.{measurement_id},session_id.eq.{measurement_id})&user_id=eq.{user_id}&limit=1"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200 and resp.json():
+                r = resp.json()[0]
+                return {
+                    "id": r.get("id"),
+                    "session_id": r.get("session_id"),
+                    "user_id": r.get("user_id"),
+                    "download_mbps": r.get("throughput_mbps", 0.0),
+                    "upload_mbps": r.get("upload_speed_mbps", 0.0),
+                    "latency_ms": r.get("latency_avg_ms", 0.0),
+                    "jitter_ms": r.get("jitter_ms", 0.0),
+                    "status": r.get("status", "COMPLETED"),
+                    "server_node": "IPMCAS Primary Server",
+                    "created_at": r.get("created_at")
+                }
+        except Exception as e:
+            logger.error(f"Failed to fetch measurement {measurement_id}: {e}")
+    return None
+
+async def get_user_historical_summary(user_id: str) -> Dict[str, Any]:
+    """
+    Calculates summary statistics from recent valid historical measurements for a user.
+    """
+    headers = get_headers()
+    url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/measurement_results?user_id=eq.{user_id}&order=created_at.desc&limit=10"
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200 and resp.json():
+                records = resp.json()
+                valid = [r for r in records if r.get("throughput_mbps") is not None]
+                if not valid:
+                    return {"total_tests": 0}
+                
+                total_dl = sum(r.get("throughput_mbps", 0.0) or 0.0 for r in valid)
+                total_ul = sum(r.get("upload_speed_mbps", 0.0) or 0.0 for r in valid)
+                total_lat = sum(r.get("latency_avg_ms", 0.0) or 0.0 for r in valid)
+                total_jit = sum(r.get("jitter_ms", 0.0) or 0.0 for r in valid)
+                n = len(valid)
+                
+                return {
+                    "total_tests": n,
+                    "avg_download_mbps": total_dl / n,
+                    "avg_upload_mbps": total_ul / n,
+                    "avg_latency_ms": total_lat / n,
+                    "avg_jitter_ms": total_jit / n
+                }
+        except Exception as e:
+            logger.error(f"Failed to compute historical summary: {e}")
+    return {"total_tests": 0}
+
+async def save_ai_conversation(
+    user_id: str,
+    session_id: Optional[str],
+    role: str,
+    message: str,
+    context: Optional[Dict[str, Any]] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Persists an AI conversation entry into public.ai_conversations in Supabase.
+    """
+    url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/ai_conversations"
+    headers = get_headers()
+    payload = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "role": role,
+        "message": message,
+        "context": context or {}
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code in (200, 201) and resp.json():
+                return resp.json()[0]
+        except Exception as e:
+            logger.error(f"Failed to persist AI conversation: {e}")
+    return None
+
+async def get_ai_conversations(user_id: str, limit: int = 30) -> List[Dict[str, Any]]:
+    """
+    Retrieves previous AI conversation entries for an authenticated user.
+    """
+    url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/ai_conversations?user_id=eq.{user_id}&order=created_at.asc&limit={limit}"
+    headers = get_headers()
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch AI conversation history: {e}")
+    return []
+

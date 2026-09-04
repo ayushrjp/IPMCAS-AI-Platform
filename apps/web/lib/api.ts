@@ -271,7 +271,13 @@ export const api = {
   /**
    * Sends user prompt, target measurement_id, and context override to FastAPI AI Assistant endpoint.
    */
-  async askAssistant(message: string, contextOverride?: any, measurementId?: string) {
+  async askAssistant(
+    message: string,
+    contextOverride?: any,
+    measurementId?: string,
+    conversationHistory?: { role: string; content: string }[],
+    sessionId?: string
+  ) {
     const targetId = measurementId || (contextOverride && (contextOverride.id || contextOverride.measurementId || contextOverride.measurement_id)) || null;
     return fetchWithAuth<{
       answer?: string;
@@ -293,8 +299,104 @@ export const api = {
           measurement_id: targetId,
           analysis_type: targetId ? "SPECIFIC_MEASUREMENT" : undefined,
           context_override: contextOverride || null,
+          conversation_history: conversationHistory || null,
+          session_id: sessionId || null,
         }),
       }
     );
   },
+
+  /**
+   * Real-time SSE streaming method for the AI Assistant.
+   */
+  async askAssistantStream(
+    message: string,
+    onChunk: (chunk: string) => void,
+    conversationHistory?: { role: string; content: string }[],
+    contextOverride?: any,
+    measurementId?: string,
+    sessionId?: string
+  ): Promise<void> {
+    const { data: { session } } = await supabase.auth.getSession();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (session?.access_token) {
+      headers['Authorization'] = `Bearer ${session.access_token}`;
+    }
+
+    const targetId = measurementId || (contextOverride && (contextOverride.id || contextOverride.measurementId || contextOverride.measurement_id)) || null;
+
+    const response = await fetch(`${API_BASE_URL}/api/v1/assistant/chat/stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        message,
+        measurement_id: targetId,
+        context_override: contextOverride || null,
+        conversation_history: conversationHistory || null,
+        session_id: sessionId || null,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new APIError('I couldn\'t reach the AI service right now. Your measurement data is still available.', response.status);
+    }
+
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder('utf-8');
+    if (!reader) return;
+
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data: ')) {
+          const rawData = trimmed.replace('data: ', '').trim();
+          if (rawData === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(rawData);
+            if (parsed.content) {
+              onChunk(parsed.content);
+            }
+          } catch {
+            if (rawData) onChunk(rawData);
+          }
+        }
+      }
+    }
+  },
+
+  /**
+   * Fetches AI conversation history for authenticated user.
+   */
+  async getAIHistory(limit: number = 30) {
+    return fetchWithAuth<{ conversations: { id: string; role: string; message: string; created_at: string }[] }>(
+      `/api/v1/assistant/history?limit=${limit}`,
+      { method: 'GET' }
+    );
+  },
+
+  /**
+   * Fetches performance and latency insights from the backend.
+   */
+  async getAIInsights(measurementId?: string) {
+    const query = measurementId ? `?measurement_id=${encodeURIComponent(measurementId)}` : '';
+    return fetchWithAuth<{
+      summary: string;
+      throughput_status: string;
+      latency_status: string;
+      jitter_status: string;
+      overall_rating: string;
+      historical_comparison: string;
+      recommended_action: string;
+    }>(`/api/v1/assistant/insights${query}`, { method: 'GET' });
+  },
 };
+
