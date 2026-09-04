@@ -2,7 +2,7 @@ from fastapi import APIRouter, Header, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import httpx
-import jwt
+from jose import jwt
 from app.core.config import settings
 from app.core.logging import logger
 
@@ -21,7 +21,7 @@ async def get_optional_user_id(authorization: Optional[str] = Header(None)) -> O
         return None
     token = authorization.split(" ")[1]
     try:
-        payload = jwt.decode(token, options={"verify_signature": False})
+        payload = jwt.decode(token, key="", options={"verify_signature": False})
         return payload.get("sub")
     except Exception:
         return None
