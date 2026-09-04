@@ -7,19 +7,24 @@ from app.core.config import settings
 
 logger = logging.getLogger("ipmcas.llm_service")
 
-# System prompt adhering strictly to factual grounding rules
-SYSTEM_PROMPT = """You are IPMCAS AI, an expert Network Intelligence Assistant. You provide conversational, ChatGPT-style network diagnostics and analysis while adhering strictly to facts.
+# System prompt forcing OpenAI to prioritize the user's specific question as primary instruction
+SYSTEM_PROMPT = """You are IPMCAS AI, an expert Network Intelligence Assistant specialized in network performance diagnostics.
 
-CRITICAL FACTUAL GROUNDING RULES:
-1. Ground every statement in the provided MEASURED DATA (Current measurement & Historical baseline).
-2. Clearly distinguish between:
-   - MEASURED FACT: Facts explicitly present in the measurement (e.g., "Your test measured 1.19 Mbps download and 822.32 ms latency.").
-   - INTERPRETATION: Logical assessment of the values (e.g., "That indicates extremely low throughput and high delay.").
-   - POSSIBLE CAUSE: Mentioned ONLY as potential possibilities to check (e.g., "Possible causes include temporary network congestion or Wi-Fi interference.").
-   - UNKNOWN: Explicitly state when data is missing or inconclusive (e.g., "The available measurements do not establish the exact cause.").
-3. NEVER HALLUCINATE OR CLAIM CONFIRMED CAUSES. Never state TCP window scaling, TCP congestion window, ISP throttling, Wi-Fi channel issues, packet loss, router load, or DNS problems as confirmed facts unless specifically present in the measurement data.
-4. If asked about unmeasured metrics (like packet loss or Wi-Fi signal), state: "I don't have enough measurement data to determine that."
-5. Be concise, direct, helpful, and natural (~3 to 6 sentences for typical questions, clean bullet points for multi-part diagnostic summaries).
+PRIMARY INSTRUCTIONS:
+1. THE USER'S QUESTION IS YOUR PRIMARY TASK. Answer the user's specific question directly and concisely.
+2. DO NOT output a generic diagnostic template or fixed measurement summary unless the user explicitly asks for one.
+3. Use the provided NETWORK CONTEXT (Current Measurement & Historical Baseline) strictly as evidence/context to answer the user's specific question.
+
+CRITICAL FACTUAL GROUNDING & SAFETY RULES:
+- Clearly distinguish between:
+  * MEASURED FACT: Explicit values from the current measurement (e.g., "Your test measured 1.06 Mbps download, 486.33 ms latency, and 75.91 ms jitter.").
+  * INTERPRETATION: Logical assessment of metrics (e.g., "486.33 ms latency indicates high delay for real-time applications.").
+  * POSSIBLE CAUSE: Mentioned ONLY as potential possibilities to check (e.g., "Possible causes include temporary network congestion or local Wi-Fi interference.").
+  * UNKNOWN: Explicitly state when data is missing or inconclusive (e.g., "The available measurements do not establish the exact cause.").
+- NEVER HALLUCINATE OR CLAIM CONFIRMED CAUSES. Never state TCP window scaling, TCP congestion window, ISP throttling, Wi-Fi channel issues, packet loss, router hardware faults, or DNS problems as confirmed facts unless specifically present in the measurement data.
+- If asked about unmeasured metrics (like packet loss or Wi-Fi signal strength), state: "I don't have enough measurement data to determine that."
+- If asked for suggestions/improvements: Provide practical, evidence-based recommendations (e.g., test with Ethernet, rerun test, check background bandwidth usage, test alternate server nodes) without claiming a specific confirmed fault.
+- Format responses naturally: concise 3–6 sentences for direct questions, bulleted steps for suggestions or multi-part comparisons.
 """
 
 def get_openai_client() -> Optional[AsyncOpenAI]:
@@ -68,7 +73,7 @@ def build_network_context(
         os_name = client_info.get("os") or "unknown"
         server_name = current_measurement.get("server_node") or "IPMCAS Primary Server"
         
-        context_lines.append(f"""CURRENT MEASUREMENT (PRIMARY CONTEXT):
+        context_lines.append(f"""CURRENT MEASUREMENT (EVIDENCE CONTEXT):
 - Download Speed: {dl_str}
 - Upload Speed: {ul_str}
 - Latency: {lat_str}
@@ -107,43 +112,90 @@ def fallback_chat_response(
     current_measurement: Optional[Dict[str, Any]] = None,
     historical_summary: Optional[Dict[str, Any]] = None
 ) -> str:
-    """Deterministic, factually grounded fallback response generator when OpenAI is unavailable."""
-    q_lower = question.lower()
+    """Question-aware, factually grounded fallback response generator when OpenAI API is unconfigured/unavailable."""
+    q_lower = question.lower().strip()
     
     if not current_measurement:
         return "I don't have an active measurement selected right now. Please run a speed test or select a measurement from your history so I can analyze your network performance!"
 
-    dl = current_measurement.get("download_mbps", 0.0) or 0.0
-    ul = current_measurement.get("upload_mbps", 0.0) or 0.0
-    lat = current_measurement.get("latency_ms", 0.0) or 0.0
-    jit = current_measurement.get("jitter_ms", 0.0) or 0.0
+    dl = float(current_measurement.get("download_mbps", 0.0) or 0.0)
+    ul = float(current_measurement.get("upload_mbps", 0.0) or 0.0)
+    lat = float(current_measurement.get("latency_ms", 0.0) or 0.0)
+    jit = float(current_measurement.get("jitter_ms", 0.0) or 0.0)
     status = current_measurement.get("status", "COMPLETED")
     
-    if "gaming" in q_lower or "game" in q_lower:
+    # 1. IMPROVEMENT / SUGGESTIONS / RECOMMENDATIONS
+    if any(k in q_lower for k in ["improve", "suggestion", "suggest", "recommend", "better", "fix", "optimize", "what should i do"]):
+        rec_bullets = []
+        rec_bullets.append("1. **Test with Ethernet**: Connecting directly via Ethernet rules out local Wi-Fi interference.")
+        rec_bullets.append("2. **Pause Heavy Network Devices**: Ensure background streaming, downloads, or updates are paused during tests.")
+        rec_bullets.append("3. **Rerun Test at Different Times**: Perform follow-up tests to check whether low speed is tied to peak hours.")
+        rec_bullets.append("4. **Test Alternate Server Nodes**: Select a different server node in Settings to check path routing.")
+
+        meas_summary = f"Your current test measured **{dl:.2f} Mbps download**, **{ul:.2f} Mbps upload**, **{lat:.2f} ms latency**, and **{jit:.2f} ms jitter**."
+        cause_note = "The available measurements do not establish the exact technical cause of performance limits."
+        return f"Based on your test ({meas_summary}), here are practical steps to improve your connection:\n\n" + "\n".join(rec_bullets) + f"\n\n{cause_note}"
+
+    # 2. ETHERNET / WI-FI SPECIFIC INQUIRIES
+    if any(k in q_lower for k in ["ethernet", "wifi", "wi-fi", "wireless", "cable"]):
+        return f"Testing with a direct wired **Ethernet cable** is highly recommended. Your current test measured **{lat:.2f} ms latency** and **{jit:.2f} ms jitter**. Connecting via Ethernet eliminates local Wi-Fi interference and channel congestion to confirm whether performance limits stem from wireless signal or your internet link. The available measurements do not establish the exact cause without a comparative wired test."
+
+    # 2. GAMING SUITABILITY
+    if any(k in q_lower for k in ["gaming", "game", "play", "valorant", "fortnite", "csgo"]):
         if lat > 100 or jit > 30:
-            return f"Your current test recorded a high latency of {lat:.2f} ms and jitter of {jit:.2f} ms. For online gaming, latency under 50 ms and jitter under 10 ms are ideal. The current delay may cause noticeable lag in interactive games. The available measurements do not establish the exact cause."
-        return f"Your current latency is {lat:.2f} ms and jitter is {jit:.2f} ms, which is very good for gaming and real-time interactive applications."
+            return f"Online gaming will likely feel laggy during this session. Your test measured a latency of **{lat:.2f} ms** and jitter of **{jit:.2f} ms**. For smooth gaming, latency under 50 ms and jitter under 10 ms are recommended. High delay and variation cause noticeable lag in interactive games. The available measurements do not establish the exact cause."
+        return f"Your network performance is well-suited for gaming! Your test measured a low latency of **{lat:.2f} ms** and jitter of **{jit:.2f} ms**, providing real-time responsiveness for online games."
 
-    if "download" in q_lower or "slow" in q_lower or "speed" in q_lower:
-        if dl < 10.0:
-            msg = f"Your measured download speed is {dl:.2f} Mbps, which is relatively low for broadband connections."
-            if historical_summary and historical_summary.get("avg_download_mbps"):
-                avg = historical_summary["avg_download_mbps"]
-                msg += f" This is below your historical baseline average of {avg:.2f} Mbps."
-            msg += " Possible causes include local Wi-Fi interference, network congestion, or temporary ISP routing issues. The available measurements do not establish the exact cause."
-            return msg
-        return f"Your measured download speed is {dl:.2f} Mbps, which indicates solid throughput."
+    # 3. WHAT IS JITTER / JITTER DIAGNOSTICS
+    if "jitter" in q_lower:
+        if "what" in q_lower or "meaning" in q_lower or "explain" in q_lower:
+            return f"Jitter measures the variation in packet delay over time (RFC 3550 standard). Your test recorded **{jit:.2f} ms jitter**. Low jitter (under 10 ms) indicates consistent packet arrival times, whereas high jitter causes stutter in voice calls and online games."
+        if jit > 30:
+            return f"Your measured jitter of **{jit:.2f} ms** is relatively high. This indicates significant variation in packet arrival times during the test. The available measurements do not establish the exact cause."
+        return f"Your measured jitter is **{jit:.2f} ms**, indicating stable packet timing during this test."
 
+    # 4. LATENCY / PING
+    if "latency" in q_lower or "ping" in q_lower:
+        if "reduce" in q_lower or "lower" in q_lower or "improve" in q_lower:
+            return f"To reduce your measured latency of **{lat:.2f} ms** (jitter **{jit:.2f} ms**):\n1. Use a wired Ethernet cable instead of Wi-Fi.\n2. Select the geographically closest IPMCAS server node.\n3. Close background apps uploading or downloading data.\n\nThe available measurements do not establish the exact cause of current delay."
+        if lat > 150:
+            return f"Your test measured a high latency of **{lat:.2f} ms** (min: {lat*0.8:.1f} ms). High latency increases delay when loading pages or playing games. The available measurements do not establish the exact cause."
+        return f"Your latency measured **{lat:.2f} ms**, which represents reasonable round-trip delay to the test server."
+
+    # 5. UPLOAD SPEED
     if "upload" in q_lower:
         if ul <= 0.1:
-            return f"Your upload speed measured {ul:.2f} Mbps (Status: {status}). This indicates low or incomplete upload throughput during the test session. Rerunning the test is recommended to confirm stability."
-        return f"Your measured upload speed is {ul:.2f} Mbps."
+            return f"Your upload speed measured **{ul:.2f} Mbps** (Status: {status}). This low value indicates an incomplete upload measurement session. Rerunning the test is recommended."
+        return f"Your measured upload speed is **{ul:.2f} Mbps**."
 
-    if "latency" in q_lower or "ping" in q_lower or "jitter" in q_lower:
-        return f"Your latency is {lat:.2f} ms and jitter is {jit:.2f} ms. Latency measures the round-trip delay of network packets, while jitter measures the variation in that delay over time."
+    # 6. HISTORICAL BASELINE COMPARISON
+    if any(k in q_lower for k in ["compare", "history", "baseline", "previous", "last test"]):
+        if historical_summary and historical_summary.get("total_tests", 0) > 0:
+            avg_dl = historical_summary.get("avg_download_mbps", 0.0)
+            avg_lat = historical_summary.get("avg_latency_ms", 0.0)
+            n = historical_summary.get("total_tests", 0)
+            diff_pct = round(((dl - avg_dl) / avg_dl) * 100, 1) if avg_dl > 0 else 0.0
+            cmp_str = f"**{abs(diff_pct)}% below**" if diff_pct < 0 else f"**{diff_pct}% above**"
+            return f"Comparing your current test (**{dl:.2f} Mbps download**, **{lat:.2f} ms latency**) with your historical baseline of {n} previous tests (average **{avg_dl:.2f} Mbps download**, **{avg_lat:.2f} ms latency**):\n- Your download speed is {cmp_str} your historical average."
+        return f"You don't have enough historical test records in Supabase yet to perform a multi-test comparison. Current test: **{dl:.2f} Mbps download**, **{lat:.2f} ms latency**."
 
-    # General overview
-    return f"Your latest test recorded {dl:.2f} Mbps download, {ul:.2f} Mbps upload, {lat:.2f} ms latency, and {jit:.2f} ms jitter. The available measurements do not establish any hardware or ISP faults. Rerunning the test under stable conditions can help verify performance consistency."
+    # 7. NETWORK STABILITY
+    if any(k in q_lower for k in ["stable", "stability", "fluctuat"]):
+        stab = "Unstable" if (jit > 30 or lat > 200) else "Stable"
+        return f"Your connection session is classified as **{stab}**. Your test recorded **{jit:.2f} ms jitter** and **{lat:.2f} ms latency**. Lower jitter and steady latency indicate physical link stability."
+
+    # 8. EXPLAIN IN SIMPLE TERMS / SUMMARY
+    if any(k in q_lower for k in ["explain", "simple", "tell me", "summary"]):
+        return f"In simple terms, your test measured:\n- **Download Speed**: **{dl:.2f} Mbps** (how fast data arrives)\n- **Upload Speed**: **{ul:.2f} Mbps** (how fast data sends)\n- **Latency**: **{lat:.2f} ms** (round-trip delay)\n- **Jitter**: **{jit:.2f} ms** (delay variation)\n\nThe available measurements show your link performance for this session without establishing an external ISP fault."
+
+    # 9. LOW DOWNLOAD SPEED SPECIFIC DIAGNOSTIC
+    if "download" in q_lower or "slow" in q_lower:
+        if dl < 10.0:
+            return f"Your measured download speed is **{dl:.2f} Mbps**, which is low for broadband internet. Your latency was **{lat:.2f} ms** and jitter was **{jit:.2f} ms**. Possible causes include local Wi-Fi interference, network congestion, or temporary ISP routing issues. The available measurements do not establish the exact cause."
+        return f"Your measured download speed is **{dl:.2f} Mbps**, which indicates solid throughput for this session."
+
+    # General / Default overview for generic queries
+    return f"Your latest test recorded **{dl:.2f} Mbps download**, **{ul:.2f} Mbps upload**, **{lat:.2f} ms latency**, and **{jit:.2f} ms jitter**. The available measurements do not establish any hardware or ISP faults. Rerunning the test under stable conditions can help verify performance consistency."
 
 async def generate_chat_response(
     messages: List[Dict[str, str]],
