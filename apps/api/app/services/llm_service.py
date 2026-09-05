@@ -7,281 +7,304 @@ from app.core.config import settings
 
 logger = logging.getLogger("ipmcas.llm_service")
 
-# System prompt forcing OpenAI to prioritize the user's specific question as primary instruction
-SYSTEM_PROMPT = """You are IPMCAS AI, an expert Network Intelligence Assistant specialized in network performance diagnostics.
+# ─────────────────────────────────────────────────────────────────────────────
+# SYSTEM PROMPT
+# The LLM is instructed to answer the user's exact question using the
+# structured measurement context as evidence only.  It MUST NOT generate a
+# fixed measurement-summary template.
+# ─────────────────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are IPMCAS AI, a network performance assistant.
 
-PRIMARY INSTRUCTIONS:
-1. THE USER'S QUESTION IS YOUR PRIMARY TASK. Answer the user's specific question directly and concisely.
-2. DO NOT output a generic diagnostic template or fixed measurement summary unless the user explicitly asks for one.
-3. DO NOT begin your response with "Your test measured..." or repeat a fixed measurement summary sentence unless the user specifically asks for a test overview.
-4. Use the provided NETWORK CONTEXT (Current Measurement & Historical Baseline) strictly as evidence/context to answer the user's specific question.
+Your primary task is to answer the user's exact question.
 
-CRITICAL FACTUAL GROUNDING & SAFETY RULES:
-- Clearly distinguish between:
-  * MEASURED FACT: Explicit values from current test (e.g., "download was 1.06 Mbps, latency was 486.33 ms").
-  * INTERPRETATION: Logical assessment of metrics (e.g., "486.33 ms latency indicates high delay for real-time applications.").
-  * POSSIBLE CAUSE: Mentioned ONLY as potential possibilities to check (e.g., "Possible causes include temporary network congestion or local Wi-Fi interference.").
-  * UNKNOWN: Explicitly state when data is missing or inconclusive (e.g., "The available measurements do not establish the exact cause.").
-- NEVER HALLUCINATE OR CLAIM CONFIRMED CAUSES. Never state TCP window scaling, TCP congestion window, ISP throttling, Wi-Fi channel issues, packet loss, router hardware faults, or DNS problems as confirmed facts unless specifically present in the measurement data.
-- If asked about unmeasured metrics (like packet loss or Wi-Fi signal strength), state: "I don't have enough measurement data to determine that."
-- If asked for suggestions/improvements: Provide practical, evidence-based recommendations (e.g., test with Ethernet, rerun test, check background bandwidth usage, test alternate server nodes) without claiming a specific confirmed fault.
-- Format responses naturally: concise 3–6 sentences for direct questions, bulleted steps for suggestions or multi-part comparisons.
+Rules:
+1. Read the user's question carefully and answer THAT specific question.
+2. Use the STRUCTURED MEASUREMENT CONTEXT below as evidence to support your answer.
+3. Do NOT begin every response with "Your test measured..." unless the user explicitly asked for a summary.
+4. Do NOT produce the same answer regardless of what the user asked.
+5. Clearly label what is a measured fact, what is your interpretation, and what is an unknown.
+6. Never claim a confirmed technical cause (TCP window scaling, ISP throttling, Wi-Fi interference, server saturation, routing issues, congestion, packet loss) unless that metric is actually present in the measurement data.
+7. If a cause cannot be determined from the available data, say so explicitly.
+8. For improvement questions: give practical, actionable steps (Ethernet test, rerun at different times, try alternate server node, pause background traffic) without claiming a confirmed fault.
+9. For definition questions ("What is jitter?"): define the term first, then reference the measured value.
+10. For download-speed questions: report the measured download value and interpret it; do not pivot to latency or upload unless asked.
 """
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CLIENT / MODEL RESOLUTION
+# ─────────────────────────────────────────────────────────────────────────────
 def get_openai_client() -> Optional[AsyncOpenAI]:
-    """Retrieves an initialized AsyncOpenAI client if a valid key is set."""
+    """Returns an AsyncOpenAI client if a valid OpenAI or Gemini API key is configured, else None."""
     api_key = (
+        os.getenv("GEMINI_API_KEY") or
         os.getenv("OPENAI_API_KEY") or
+        os.getenv("LLM_API_KEY") or
+        getattr(settings, "GEMINI_API_KEY", None) or
         getattr(settings, "OPENAI_API_KEY", None) or
-        settings.LLM_API_KEY
+        getattr(settings, "LLM_API_KEY", None)
     )
-    if not api_key or api_key in ["placeholder-key", "your_openai_api_key_here", "sk-placeholder"]:
+    invalid = {"placeholder-key", "your_openai_api_key_here", "sk-placeholder",
+               "your-llm-api-key-here", "placeholder-service-role-key", ""}
+    if not api_key or api_key.strip() in invalid:
+        logger.warning(
+            "[LLM SERVICE] No valid OpenAI/Gemini/LLM API key found in environment. "
+            "Set OPENAI_API_KEY, GEMINI_API_KEY, or LLM_API_KEY in the Render environment variables."
+        )
         return None
-    
-    return AsyncOpenAI(api_key=api_key)
+
+    key_clean = api_key.strip()
+    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL")
+    if not base_url and (key_clean.startswith("AQ.") or key_clean.startswith("AIza") or os.getenv("GEMINI_API_KEY")):
+        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+    if base_url:
+        return AsyncOpenAI(api_key=key_clean, base_url=base_url)
+    return AsyncOpenAI(api_key=key_clean)
+
 
 def get_model_name() -> str:
-    """Returns configured OpenAI model name."""
-    return (
+    """Returns the configured LLM model name."""
+    configured = (
+        os.getenv("GEMINI_MODEL") or
         os.getenv("OPENAI_MODEL") or
+        os.getenv("LLM_MODEL") or
+        getattr(settings, "GEMINI_MODEL", None) or
         getattr(settings, "OPENAI_MODEL", None) or
-        settings.LLM_MODEL or
-        "gpt-4o"
+        getattr(settings, "LLM_MODEL", None)
     )
+    if configured:
+        return configured
 
+    api_key = (
+        os.getenv("GEMINI_API_KEY") or
+        os.getenv("OPENAI_API_KEY") or
+        os.getenv("LLM_API_KEY") or ""
+    )
+    if api_key.startswith("AQ.") or api_key.startswith("AIza") or os.getenv("GEMINI_API_KEY"):
+        return "gemini-3.6-flash"
+    return "gpt-4o"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORK CONTEXT BUILDER
+# Formats measurement data as structured text for the LLM system message.
+# This is CONTEXT only — the Python layer never reads these values to
+# construct the final answer.
+# ─────────────────────────────────────────────────────────────────────────────
 def build_network_context(
     current_measurement: Optional[Dict[str, Any]] = None,
-    historical_summary: Optional[Dict[str, Any]] = None
+    historical_summary: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Formats current measurement and historical summary into structured LLM context."""
-    context_lines = []
-    
+    """Formats current measurement and historical summary into a structured block for the LLM."""
+    sections: List[str] = []
+
     if current_measurement:
-        dl = current_measurement.get("download_mbps")
-        ul = current_measurement.get("upload_mbps")
+        dl  = current_measurement.get("download_mbps")
+        ul  = current_measurement.get("upload_mbps")
         lat = current_measurement.get("latency_ms")
         jit = current_measurement.get("jitter_ms")
-        status = current_measurement.get("status", "unknown")
-        
-        dl_str = f"{dl:.2f} Mbps" if isinstance(dl, (int, float)) else "not measured / 0 Mbps"
-        ul_str = f"{ul:.2f} Mbps" if isinstance(ul, (int, float)) else "not measured / 0 Mbps"
-        lat_str = f"{lat:.2f} ms" if isinstance(lat, (int, float)) else "not measured"
-        jit_str = f"{jit:.2f} ms" if isinstance(jit, (int, float)) else "not measured"
-        
+        status   = current_measurement.get("status", "unknown")
+        server   = current_measurement.get("server_node") or current_measurement.get("server_name") or "IPMCAS Primary Server"
+        ts       = current_measurement.get("created_at") or current_measurement.get("timestamp") or "N/A"
+        meas_id  = current_measurement.get("id") or current_measurement.get("measurement_id") or "current"
+
         client_info = current_measurement.get("client_info") or {}
-        conn_type = client_info.get("connection_type") or "unknown"
-        browser = client_info.get("browser") or "unknown"
-        os_name = client_info.get("os") or "unknown"
-        server_name = current_measurement.get("server_node") or "IPMCAS Primary Server"
-        
-        context_lines.append(f"""CURRENT MEASUREMENT (EVIDENCE CONTEXT):
-- Download Speed: {dl_str}
-- Upload Speed: {ul_str}
-- Latency: {lat_str}
-- Jitter: {jit_str}
-- Measurement Status: {status}
-- Server Node: {server_name}
-- Connection Type: {conn_type}
-- Client Environment: {browser} on {os_name}""")
+        conn_type   = client_info.get("connection_type") or "unknown"
+        browser     = client_info.get("browser") or "unknown"
+        os_name     = client_info.get("os") or "unknown"
+
+        dl_str  = f"{dl:.2f} Mbps"  if isinstance(dl,  (int, float)) else "not measured"
+        ul_str  = f"{ul:.2f} Mbps"  if isinstance(ul,  (int, float)) else "not measured"
+        lat_str = f"{lat:.2f} ms"   if isinstance(lat, (int, float)) else "not measured"
+        jit_str = f"{jit:.2f} ms"   if isinstance(jit, (int, float)) else "not measured"
+
+        sections.append(
+            f"CURRENT MEASUREMENT (measurement id: {meas_id}):\n"
+            f"  Download Speed : {dl_str}\n"
+            f"  Upload Speed   : {ul_str}\n"
+            f"  Latency (avg)  : {lat_str}\n"
+            f"  Jitter         : {jit_str}\n"
+            f"  Status         : {status}\n"
+            f"  Server         : {server}\n"
+            f"  Timestamp      : {ts}\n"
+            f"  Connection Type: {conn_type}\n"
+            f"  Client         : {browser} on {os_name}"
+        )
     else:
-        context_lines.append("CURRENT MEASUREMENT: None currently selected.")
-        
+        sections.append("CURRENT MEASUREMENT: None selected. Ask the user to run or select a speed test.")
+
     if historical_summary and historical_summary.get("total_tests", 0) > 0:
-        avg_dl = historical_summary.get("avg_download_mbps")
-        avg_ul = historical_summary.get("avg_upload_mbps")
+        n       = historical_summary.get("total_tests", 0)
+        avg_dl  = historical_summary.get("avg_download_mbps")
+        avg_ul  = historical_summary.get("avg_upload_mbps")
         avg_lat = historical_summary.get("avg_latency_ms")
         avg_jit = historical_summary.get("avg_jitter_ms")
-        total = historical_summary.get("total_tests", 0)
-        
-        avg_dl_s = f"{avg_dl:.2f} Mbps" if isinstance(avg_dl, (int, float)) else "unavailable"
-        avg_ul_s = f"{avg_ul:.2f} Mbps" if isinstance(avg_ul, (int, float)) else "unavailable"
-        avg_lat_s = f"{avg_lat:.2f} ms" if isinstance(avg_lat, (int, float)) else "unavailable"
-        avg_jit_s = f"{avg_jit:.2f} ms" if isinstance(avg_jit, (int, float)) else "unavailable"
-        
-        context_lines.append(f"""HISTORICAL BASELINE ({total} previous tests):
-- Average Download: {avg_dl_s}
-- Average Upload: {avg_ul_s}
-- Average Latency: {avg_lat_s}
-- Average Jitter: {avg_jit_s}""")
+
+        avg_dl_s  = f"{avg_dl:.2f} Mbps" if isinstance(avg_dl,  (int, float)) else "unavailable"
+        avg_ul_s  = f"{avg_ul:.2f} Mbps" if isinstance(avg_ul,  (int, float)) else "unavailable"
+        avg_lat_s = f"{avg_lat:.2f} ms"  if isinstance(avg_lat, (int, float)) else "unavailable"
+        avg_jit_s = f"{avg_jit:.2f} ms"  if isinstance(avg_jit, (int, float)) else "unavailable"
+
+        sections.append(
+            f"HISTORICAL BASELINE ({n} previous tests):\n"
+            f"  Avg Download: {avg_dl_s}\n"
+            f"  Avg Upload  : {avg_ul_s}\n"
+            f"  Avg Latency : {avg_lat_s}\n"
+            f"  Avg Jitter  : {avg_jit_s}"
+        )
     else:
-        context_lines.append("HISTORICAL BASELINE: No prior test history available.")
-        
-    return "\n\n".join(context_lines)
+        sections.append("HISTORICAL BASELINE: No prior test history available.")
 
-def fallback_chat_response(
-    question: str,
-    current_measurement: Optional[Dict[str, Any]] = None,
-    historical_summary: Optional[Dict[str, Any]] = None
-) -> str:
-    """Question-aware, factually grounded fallback response generator when OpenAI API is unconfigured/unavailable."""
-    q_lower = question.lower().strip()
-    
-    if not current_measurement:
-        return "I don't have an active measurement selected right now. Please run a speed test or select a measurement from your history so I can analyze your network performance!"
+    return "\n\n".join(sections)
 
-    dl = float(current_measurement.get("download_mbps", 0.0) or 0.0)
-    ul = float(current_measurement.get("upload_mbps", 0.0) or 0.0)
-    lat = float(current_measurement.get("latency_ms", 0.0) or 0.0)
-    jit = float(current_measurement.get("jitter_ms", 0.0) or 0.0)
-    status = current_measurement.get("status", "COMPLETED")
-    
-    # 1. IMPROVEMENT / SUGGESTIONS / RECOMMENDATIONS
-    if any(k in q_lower for k in ["improve", "suggestion", "suggest", "recommend", "better", "fix", "optimize", "what should i do"]):
-        rec_bullets = []
-        rec_bullets.append("1. **Test with Ethernet**: Connecting directly via Ethernet rules out local Wi-Fi interference.")
-        rec_bullets.append("2. **Pause Heavy Network Devices**: Ensure background streaming, downloads, or updates are paused during tests.")
-        rec_bullets.append("3. **Rerun Test at Different Times**: Perform follow-up tests to check whether low speed is tied to peak hours.")
-        rec_bullets.append("4. **Test Alternate Server Nodes**: Select a different server node in Settings to check path routing.")
 
-        meas_note = f"*Measured Context: {dl:.2f} Mbps download, {ul:.2f} Mbps upload, {lat:.2f} ms latency, {jit:.2f} ms jitter.*"
-        cause_note = "The available measurements do not establish the exact technical cause of performance limits."
-        return f"Here are practical, evidence-based recommendations to improve your connection performance:\n\n" + "\n".join(rec_bullets) + f"\n\n{meas_note}\n{cause_note}"
-
-    # 2. ETHERNET / WI-FI SPECIFIC INQUIRIES
-    if any(k in q_lower for k in ["ethernet", "wifi", "wi-fi", "wireless", "cable"]):
-        return f"Testing with a direct wired **Ethernet cable** is highly recommended. Your current test measured **{lat:.2f} ms latency** and **{jit:.2f} ms jitter**. Connecting via Ethernet eliminates local Wi-Fi interference and channel congestion to confirm whether performance limits stem from wireless signal or your internet link. The available measurements do not establish the exact cause without a comparative wired test."
-
-    # 2. GAMING SUITABILITY
-    if any(k in q_lower for k in ["gaming", "game", "play", "valorant", "fortnite", "csgo"]):
-        if lat > 100 or jit > 30:
-            return f"Online gaming will likely feel laggy during this session. Your test measured a latency of **{lat:.2f} ms** and jitter of **{jit:.2f} ms**. For smooth gaming, latency under 50 ms and jitter under 10 ms are recommended. High delay and variation cause noticeable lag in interactive games. The available measurements do not establish the exact cause."
-        return f"Your network performance is well-suited for gaming! Your test measured a low latency of **{lat:.2f} ms** and jitter of **{jit:.2f} ms**, providing real-time responsiveness for online games."
-
-    # 3. WHAT IS JITTER / JITTER DIAGNOSTICS
-    if "jitter" in q_lower:
-        if "what" in q_lower or "meaning" in q_lower or "explain" in q_lower:
-            return f"Jitter measures the variation in packet delay over time (RFC 3550 standard). Your test recorded **{jit:.2f} ms jitter**. Low jitter (under 10 ms) indicates consistent packet arrival times, whereas high jitter causes stutter in voice calls and online games."
-        if jit > 30:
-            return f"Your measured jitter of **{jit:.2f} ms** is relatively high. This indicates significant variation in packet arrival times during the test. The available measurements do not establish the exact cause."
-        return f"Your measured jitter is **{jit:.2f} ms**, indicating stable packet timing during this test."
-
-    # 4. LATENCY / PING
-    if "latency" in q_lower or "ping" in q_lower:
-        if "reduce" in q_lower or "lower" in q_lower or "improve" in q_lower:
-            return f"To reduce your measured latency of **{lat:.2f} ms** (jitter **{jit:.2f} ms**):\n1. Use a wired Ethernet cable instead of Wi-Fi.\n2. Select the geographically closest IPMCAS server node.\n3. Close background apps uploading or downloading data.\n\nThe available measurements do not establish the exact cause of current delay."
-        if lat > 150:
-            return f"Your test measured a high latency of **{lat:.2f} ms** (min: {lat*0.8:.1f} ms). High latency increases delay when loading pages or playing games. The available measurements do not establish the exact cause."
-        return f"Your latency measured **{lat:.2f} ms**, which represents reasonable round-trip delay to the test server."
-
-    # 5. UPLOAD SPEED
-    if "upload" in q_lower:
-        if ul <= 0.1:
-            return f"Your upload speed measured **{ul:.2f} Mbps** (Status: {status}). This low value indicates an incomplete upload measurement session. Rerunning the test is recommended."
-        return f"Your measured upload speed is **{ul:.2f} Mbps**."
-
-    # 6. HISTORICAL BASELINE COMPARISON
-    if any(k in q_lower for k in ["compare", "history", "baseline", "previous", "last test"]):
-        if historical_summary and historical_summary.get("total_tests", 0) > 0:
-            avg_dl = historical_summary.get("avg_download_mbps", 0.0)
-            avg_lat = historical_summary.get("avg_latency_ms", 0.0)
-            n = historical_summary.get("total_tests", 0)
-            diff_pct = round(((dl - avg_dl) / avg_dl) * 100, 1) if avg_dl > 0 else 0.0
-            cmp_str = f"**{abs(diff_pct)}% below**" if diff_pct < 0 else f"**{diff_pct}% above**"
-            return f"Comparing your current test (**{dl:.2f} Mbps download**, **{lat:.2f} ms latency**) with your historical baseline of {n} previous tests (average **{avg_dl:.2f} Mbps download**, **{avg_lat:.2f} ms latency**):\n- Your download speed is {cmp_str} your historical average."
-        return f"You don't have enough historical test records in Supabase yet to perform a multi-test comparison. Current test: **{dl:.2f} Mbps download**, **{lat:.2f} ms latency**."
-
-    # 7. NETWORK STABILITY
-    if any(k in q_lower for k in ["stable", "stability", "fluctuat"]):
-        stab = "Unstable" if (jit > 30 or lat > 200) else "Stable"
-        return f"Your connection session is classified as **{stab}**. Your test recorded **{jit:.2f} ms jitter** and **{lat:.2f} ms latency**. Lower jitter and steady latency indicate physical link stability."
-
-    # 8. EXPLAIN IN SIMPLE TERMS / SUMMARY
-    if any(k in q_lower for k in ["explain", "simple", "tell me", "summary"]):
-        return f"In simple terms, your test measured:\n- **Download Speed**: **{dl:.2f} Mbps** (how fast data arrives)\n- **Upload Speed**: **{ul:.2f} Mbps** (how fast data sends)\n- **Latency**: **{lat:.2f} ms** (round-trip delay)\n- **Jitter**: **{jit:.2f} ms** (delay variation)\n\nThe available measurements show your link performance for this session without establishing an external ISP fault."
-
-    # 9. LOW DOWNLOAD SPEED SPECIFIC DIAGNOSTIC
-    if "download" in q_lower or "slow" in q_lower:
-        if dl < 10.0:
-            return f"Your measured download speed is **{dl:.2f} Mbps**, which is low for broadband internet. Your latency was **{lat:.2f} ms** and jitter was **{jit:.2f} ms**. Possible causes include local Wi-Fi interference, network congestion, or temporary ISP routing issues. The available measurements do not establish the exact cause."
-        return f"Your measured download speed is **{dl:.2f} Mbps**, which indicates solid throughput for this session."
-
-    # General / Default overview for generic queries
-    return f"Your latest test recorded **{dl:.2f} Mbps download**, **{ul:.2f} Mbps upload**, **{lat:.2f} ms latency**, and **{jit:.2f} ms jitter**. The available measurements do not establish any hardware or ISP faults. Rerunning the test under stable conditions can help verify performance consistency."
-
+# ─────────────────────────────────────────────────────────────────────────────
+# CHAT RESPONSE — NON-STREAMING
+# The user's message is the last entry in `messages` with role="user".
+# The measurement data is in the system message only.
+# There is NO Python-level fallback that generates a template answer.
+# ─────────────────────────────────────────────────────────────────────────────
 async def generate_chat_response(
     messages: List[Dict[str, str]],
     current_measurement: Optional[Dict[str, Any]] = None,
-    historical_summary: Optional[Dict[str, Any]] = None
+    historical_summary: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Generates a non-streaming chat response using OpenAI or falls back gracefully."""
+    """
+    Calls the OpenAI chat completions API and returns the LLM response.
+
+    Raises HTTPException(503) if no API key is configured.
+    Raises HTTPException(502) if the OpenAI call fails.
+
+    IMPORTANT: This function does NOT fall back to any Python-generated
+    template string.  All answers come from the LLM.
+    """
+    from fastapi import HTTPException
+
     client = get_openai_client()
     if not client:
-        last_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return fallback_chat_response(last_user_msg, current_measurement, historical_summary)
-        
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AI Service is unavailable: no valid LLM API key is configured on this server. "
+                "Set OPENAI_API_KEY in the Render environment variables."
+            ),
+        )
+
     network_context = build_network_context(current_measurement, historical_summary)
-    
-    formatted_messages = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nNETWORK CONTEXT:\n{network_context}"}
-    ]
-    
-    # Append past conversation messages (keep up to last 10)
+    system_content  = f"{SYSTEM_PROMPT}\n\nSTRUCTURED MEASUREMENT CONTEXT:\n{network_context}"
+
+    # Build the full message list: system first, then the conversation history
+    formatted: List[Dict[str, str]] = [{"role": "system", "content": system_content}]
     for m in messages[-10:]:
-        formatted_messages.append({"role": m["role"], "content": m["content"]})
-        
+        formatted.append({"role": m["role"], "content": m["content"]})
+
+    # Log what we are about to send (no secrets)
+    last_user_q = next(
+        (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    logger.info(
+        "[LLM FLOW] -> OpenAI | user_question=%r | model=%s | context_len=%d chars",
+        last_user_q, get_model_name(), len(system_content),
+    )
+
     try:
         response = await client.chat.completions.create(
             model=get_model_name(),
-            messages=formatted_messages,
-            temperature=0.3,
-            max_tokens=500
+            messages=formatted,
+            temperature=0.4,
+            max_tokens=600,
         )
-        return response.choices[0].message.content or "I couldn't generate a response."
-    except Exception as e:
-        logger.error(f"OpenAI API call failed: {e}", exc_info=True)
-        last_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        return fallback_chat_response(last_user_msg, current_measurement, historical_summary)
+        answer = response.choices[0].message.content or "I could not generate a response."
+        logger.info("[LLM FLOW] <- OpenAI | answer_len=%d chars", len(answer))
+        return answer
 
+    except Exception as exc:
+        logger.error(
+            "[LLM FLOW] OpenAI call failed: %s: %s", type(exc).__name__, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI Service error: LLM provider call failed ({type(exc).__name__}).",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHAT RESPONSE — STREAMING (SSE)
+# Same design: user question goes to the LLM, no Python template fallback.
+# ─────────────────────────────────────────────────────────────────────────────
 async def generate_chat_response_stream(
     messages: List[Dict[str, str]],
     current_measurement: Optional[Dict[str, Any]] = None,
-    historical_summary: Optional[Dict[str, Any]] = None
+    historical_summary: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[str, None]:
-    """Generates a streaming SSE chat response using OpenAI or falls back gracefully."""
+    """
+    Streams the OpenAI response as SSE chunks.
+
+    If no API key is configured, emits a single error SSE event instead of
+    a Python-generated template answer.
+    """
     client = get_openai_client()
     if not client:
-        last_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        fallback_text = fallback_chat_response(last_user_msg, current_measurement, historical_summary)
-        # Stream fallback words with micro-chunks
-        words = fallback_text.split(" ")
-        for i, word in enumerate(words):
-            chunk = word if i == len(words) - 1 else word + " "
-            yield f"data: {json.dumps({'content': chunk})}\n\n"
+        err_msg = (
+            "AI Service is unavailable: no valid LLM API key is configured on this server. "
+            "Set OPENAI_API_KEY in the Render environment variables."
+        )
+        yield f"data: {json.dumps({'error': err_msg})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
     network_context = build_network_context(current_measurement, historical_summary)
-    formatted_messages = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}\n\nNETWORK CONTEXT:\n{network_context}"}
-    ]
+    system_content  = f"{SYSTEM_PROMPT}\n\nSTRUCTURED MEASUREMENT CONTEXT:\n{network_context}"
+
+    formatted: List[Dict[str, str]] = [{"role": "system", "content": system_content}]
     for m in messages[-10:]:
-        formatted_messages.append({"role": m["role"], "content": m["content"]})
+        formatted.append({"role": m["role"], "content": m["content"]})
+
+    last_user_q = next(
+        (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
+    )
+    logger.info(
+        "[LLM STREAM] -> OpenAI | user_question=%r | model=%s",
+        last_user_q, get_model_name(),
+    )
 
     try:
         stream = await client.chat.completions.create(
             model=get_model_name(),
-            messages=formatted_messages,
-            temperature=0.3,
-            max_tokens=500,
-            stream=True
+            messages=formatted,
+            temperature=0.4,
+            max_tokens=600,
+            stream=True,
         )
+        chunk_count = 0
         async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                text_piece = chunk.choices[0].delta.content
-                yield f"data: {json.dumps({'content': text_piece})}\n\n"
-        yield "data: [DONE]\n\n"
-    except Exception as e:
-        logger.error(f"OpenAI Streaming API failed: {e}", exc_info=True)
-        last_user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        fallback_text = fallback_chat_response(last_user_msg, current_measurement, historical_summary)
-        yield f"data: {json.dumps({'content': fallback_text})}\n\n"
+                piece = chunk.choices[0].delta.content
+                chunk_count += 1
+                yield f"data: {json.dumps({'content': piece})}\n\n"
+        logger.info("[LLM STREAM] <- OpenAI | chunks=%d", chunk_count)
         yield "data: [DONE]\n\n"
 
+    except Exception as exc:
+        logger.error(
+            "[LLM STREAM] OpenAI streaming failed: %s: %s", type(exc).__name__, exc, exc_info=True
+        )
+        err_msg = f"AI Service error: LLM provider streaming failed ({type(exc).__name__})."
+        yield f"data: {json.dumps({'error': err_msg})}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRUCTURED INSIGHTS (non-conversational endpoint)
+# This endpoint generates structured JSON insights — NOT a chat answer.
+# It uses Python logic deliberately because it returns structured fields,
+# not a free-text LLM response.
+# ─────────────────────────────────────────────────────────────────────────────
 async def generate_insights(
     current_measurement: Optional[Dict[str, Any]] = None,
-    historical_summary: Optional[Dict[str, Any]] = None
+    historical_summary: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Generates structured network insights based on facts."""
+    """Returns structured performance insight fields based on measurement data."""
     if not current_measurement:
         return {
             "summary": "No active measurement selected.",
@@ -290,38 +313,57 @@ async def generate_insights(
             "jitter_status": "Unknown",
             "overall_rating": "N/A",
             "historical_comparison": "No active test to compare.",
-            "recommended_action": "Run a speed test to generate network insights."
+            "recommended_action": "Run a speed test to generate network insights.",
         }
 
-    dl = current_measurement.get("download_mbps", 0.0) or 0.0
-    ul = current_measurement.get("upload_mbps", 0.0) or 0.0
-    lat = current_measurement.get("latency_ms", 0.0) or 0.0
-    jit = current_measurement.get("jitter_ms", 0.0) or 0.0
+    dl  = float(current_measurement.get("download_mbps", 0.0) or 0.0)
+    ul  = float(current_measurement.get("upload_mbps",   0.0) or 0.0)
+    lat = float(current_measurement.get("latency_ms",    0.0) or 0.0)
+    jit = float(current_measurement.get("jitter_ms",     0.0) or 0.0)
 
-    dl_status = "Good" if dl >= 50 else ("Fair" if dl >= 15 else "Low")
+    dl_status  = "Good" if dl  >= 50 else ("Fair" if dl  >= 15 else "Low")
     lat_status = "Excellent" if lat < 30 else ("Fair" if lat < 100 else "Very High")
-    jit_status = "Low" if jit < 15 else ("Moderate" if jit < 40 else "Very High")
+    jit_status = "Low"  if jit < 15 else ("Moderate" if jit < 40 else "Very High")
 
     hist_cmp = "No prior history available for baseline comparison."
     if historical_summary and historical_summary.get("avg_download_mbps"):
         avg_dl = historical_summary["avg_download_mbps"]
         if dl < avg_dl * 0.7:
-            hist_cmp = f"Current download ({dl:.2f} Mbps) is significantly below your average ({avg_dl:.2f} Mbps)."
+            hist_cmp = (
+                f"Current download ({dl:.2f} Mbps) is significantly below "
+                f"your average ({avg_dl:.2f} Mbps)."
+            )
         elif dl > avg_dl * 1.2:
-            hist_cmp = f"Current download ({dl:.2f} Mbps) is above your average ({avg_dl:.2f} Mbps)."
+            hist_cmp = (
+                f"Current download ({dl:.2f} Mbps) is above "
+                f"your average ({avg_dl:.2f} Mbps)."
+            )
         else:
-            hist_cmp = f"Current download ({dl:.2f} Mbps) aligns with your historical average ({avg_dl:.2f} Mbps)."
+            hist_cmp = (
+                f"Current download ({dl:.2f} Mbps) aligns with "
+                f"your historical average ({avg_dl:.2f} Mbps)."
+            )
 
-    overall = "Optimal" if (dl_status == "Good" and lat_status == "Excellent") else "Degraded" if (dl_status == "Low" or lat_status == "Very High") else "Moderate"
-
-    action = "Your connection is performing well." if overall == "Optimal" else "Rerun the speed test under stable conditions and check local device activity."
+    overall = (
+        "Optimal"  if (dl_status == "Good" and lat_status == "Excellent") else
+        "Degraded" if (dl_status == "Low"  or  lat_status == "Very High") else
+        "Moderate"
+    )
+    action = (
+        "Your connection is performing well."
+        if overall == "Optimal"
+        else "Rerun the speed test under stable conditions and check local device activity."
+    )
 
     return {
-        "summary": f"Test shows {dl:.2f} Mbps download, {ul:.2f} Mbps upload, {lat:.2f} ms latency, and {jit:.2f} ms jitter.",
+        "summary": (
+            f"Test shows {dl:.2f} Mbps download, {ul:.2f} Mbps upload, "
+            f"{lat:.2f} ms latency, and {jit:.2f} ms jitter."
+        ),
         "throughput_status": dl_status,
-        "latency_status": lat_status,
-        "jitter_status": jit_status,
-        "overall_rating": overall,
+        "latency_status":    lat_status,
+        "jitter_status":     jit_status,
+        "overall_rating":    overall,
         "historical_comparison": hist_cmp,
-        "recommended_action": action
+        "recommended_action":    action,
     }

@@ -10,7 +10,6 @@ from app.services.llm_service import (
     generate_chat_response,
     generate_chat_response_stream,
     generate_insights,
-    fallback_chat_response
 )
 from app.services.supabase_db import (
     get_measurement_by_id,
@@ -110,24 +109,38 @@ async def resolve_measurement_and_history(
     if target_id and user_id:
         target_measurement = await get_measurement_by_id(str(target_id), user_id)
         if not target_measurement and not payload.context_override:
-            # Check ownership error case
             logger.info(f"Target measurement {target_id} not found for user {user_id}")
 
     if not target_measurement and payload.context_override and isinstance(payload.context_override, dict):
+        lat_dict = payload.context_override.get("latency") if isinstance(payload.context_override.get("latency"), dict) else {}
+        server_info = payload.context_override.get("server_info") if isinstance(payload.context_override.get("server_info"), dict) else {}
+
         target_measurement = {
-            "id": payload.context_override.get("id") or "current",
-            "download_mbps": float(payload.context_override.get("downloadSpeedMbps") or payload.context_override.get("throughput_mbps") or 0.0),
-            "upload_mbps": float(payload.context_override.get("uploadSpeedMbps") or payload.context_override.get("upload_speed_mbps") or 0.0),
+            "id": payload.context_override.get("id") or payload.context_override.get("measurementId") or payload.context_override.get("measurement_id") or "current",
+            "download_mbps": float(
+                payload.context_override.get("downloadSpeedMbps") if payload.context_override.get("downloadSpeedMbps") is not None
+                else payload.context_override.get("download_mbps") if payload.context_override.get("download_mbps") is not None
+                else payload.context_override.get("throughput_mbps") or 0.0
+            ),
+            "upload_mbps": float(
+                payload.context_override.get("uploadSpeedMbps") if payload.context_override.get("uploadSpeedMbps") is not None
+                else payload.context_override.get("upload_mbps") if payload.context_override.get("upload_mbps") is not None
+                else payload.context_override.get("upload_speed_mbps") or 0.0
+            ),
             "latency_ms": float(
-                (payload.context_override.get("latency") or {}).get("avgMs") if isinstance(payload.context_override.get("latency"), dict)
-                else (payload.context_override.get("latency_avg_ms") or 0.0)
+                lat_dict.get("avgMs") if lat_dict.get("avgMs") is not None
+                else payload.context_override.get("latency_ms") if payload.context_override.get("latency_ms") is not None
+                else payload.context_override.get("latency_avg_ms") or 0.0
             ),
             "jitter_ms": float(
-                (payload.context_override.get("latency") or {}).get("jitterMs") if isinstance(payload.context_override.get("latency"), dict)
-                else (payload.context_override.get("jitter_ms") or 0.0)
+                lat_dict.get("jitterMs") if lat_dict.get("jitterMs") is not None
+                else payload.context_override.get("jitter_ms") if payload.context_override.get("jitter_ms") is not None
+                else 0.0
             ),
             "status": payload.context_override.get("status", "COMPLETED"),
-            "server_node": "IPMCAS Primary Server",
+            "concurrency": payload.context_override.get("concurrency") or "default",
+            "server_node": server_info.get("name") or payload.context_override.get("server_node") or "IPMCAS Primary Server",
+            "timestamp": payload.context_override.get("timestamp") or payload.context_override.get("created_at") or "N/A",
             "client_info": payload.context_override.get("client_info") or {}
         }
 
@@ -148,6 +161,8 @@ async def assistant_chat(
     if not payload.message or not payload.message.strip():
         raise HTTPException(status_code=400, detail="User message cannot be empty.")
 
+    logger.info(f"[ASSISTANT ROUTE] Received request | message: '{payload.message}' | user_id: {user_id}")
+
     target_measurement, historical_summary = await resolve_measurement_and_history(payload, user_id)
 
     # Reconstruct message thread for multi-turn LLM context
@@ -157,8 +172,12 @@ async def assistant_chat(
             messages.append({"role": m.role, "content": m.content})
     messages.append({"role": "user", "content": payload.message})
 
-    # Call LLM Service
+    logger.info(f"[ASSISTANT ROUTE] Calling generate_chat_response with {len(messages)} messages")
+
+    # Call LLM Service directly
     answer_text = await generate_chat_response(messages, target_measurement, historical_summary)
+
+    logger.info(f"[ASSISTANT ROUTE] generate_chat_response returned answer ({len(answer_text)} chars)")
 
     # Persist in Supabase if authenticated
     if user_id:
@@ -187,6 +206,8 @@ async def assistant_chat_stream(
     """
     if not payload.message or not payload.message.strip():
         raise HTTPException(status_code=400, detail="User message cannot be empty.")
+
+    logger.info(f"[ASSISTANT STREAM ROUTE] Received streaming request | message: '{payload.message}' | user_id: {user_id}")
 
     target_measurement, historical_summary = await resolve_measurement_and_history(payload, user_id)
 
