@@ -1,5 +1,5 @@
 import httpx
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from app.core.config import settings
 from app.core.logging import logger
 
