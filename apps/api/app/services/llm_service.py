@@ -34,54 +34,77 @@ Rules:
 # CLIENT / MODEL RESOLUTION
 # ─────────────────────────────────────────────────────────────────────────────
 def get_openai_client() -> Optional[AsyncOpenAI]:
-    """Returns an AsyncOpenAI client if a valid OpenAI or Gemini API key is configured, else None."""
-    api_key = (
+    """Returns an AsyncOpenAI-compatible client if a valid API key is configured, else None.
+
+    Priority: GEMINI_API_KEY > OPENAI_API_KEY > LLM_API_KEY.
+    When GEMINI_API_KEY is set, automatically routes to the Gemini OpenAI-compatible endpoint.
+    """
+    gemini_key = (
         os.getenv("GEMINI_API_KEY") or
+        getattr(settings, "GEMINI_API_KEY", None)
+    )
+    openai_key = (
         os.getenv("OPENAI_API_KEY") or
-        os.getenv("LLM_API_KEY") or
-        getattr(settings, "GEMINI_API_KEY", None) or
         getattr(settings, "OPENAI_API_KEY", None) or
+        os.getenv("LLM_API_KEY") or
         getattr(settings, "LLM_API_KEY", None)
     )
+
     invalid = {"placeholder-key", "your_openai_api_key_here", "sk-placeholder",
                "your-llm-api-key-here", "placeholder-service-role-key", ""}
-    if not api_key or api_key.strip() in invalid:
-        logger.warning(
-            "[LLM SERVICE] No valid OpenAI/Gemini/LLM API key found in environment. "
-            "Set OPENAI_API_KEY, GEMINI_API_KEY, or LLM_API_KEY in the Render environment variables."
+
+    if gemini_key and gemini_key.strip() not in invalid:
+        key_clean = gemini_key.strip()
+        base_url = (
+            os.getenv("GEMINI_BASE_URL") or
+            os.getenv("OPENAI_BASE_URL") or
+            os.getenv("LLM_BASE_URL") or
+            "https://generativelanguage.googleapis.com/v1beta/openai/"
         )
-        return None
-
-    key_clean = api_key.strip()
-    base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL")
-    if not base_url and (key_clean.startswith("AQ.") or key_clean.startswith("AIza") or os.getenv("GEMINI_API_KEY")):
-        base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-
-    if base_url:
+        logger.info("[LLM SERVICE] Using Gemini API via OpenAI-compatible endpoint: %s", base_url)
         return AsyncOpenAI(api_key=key_clean, base_url=base_url)
-    return AsyncOpenAI(api_key=key_clean)
+
+    if openai_key and openai_key.strip() not in invalid:
+        key_clean = openai_key.strip()
+        base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL")
+        logger.info("[LLM SERVICE] Using OpenAI API%s", f" with custom base_url={base_url}" if base_url else "")
+        if base_url:
+            return AsyncOpenAI(api_key=key_clean, base_url=base_url)
+        return AsyncOpenAI(api_key=key_clean)
+
+    logger.warning(
+        "[LLM SERVICE] No valid LLM API key found in environment. "
+        "Set GEMINI_API_KEY (for Gemini) or OPENAI_API_KEY (for OpenAI) "
+        "in the Render environment variables."
+    )
+    return None
 
 
 def get_model_name() -> str:
-    """Returns the configured LLM model name."""
+    """Returns the configured LLM model name.
+
+    Resolution order:
+      1. GEMINI_MODEL env var (when using Gemini)
+      2. OPENAI_MODEL / LLM_MODEL env var (generic override)
+      3. Automatic default based on which key is active:
+         - GEMINI_API_KEY set  ->  gemini-2.0-flash  (stable, widely available Gemini model)
+         - OPENAI_API_KEY set  ->  gpt-4o
+    """
     configured = (
         os.getenv("GEMINI_MODEL") or
-        os.getenv("OPENAI_MODEL") or
-        os.getenv("LLM_MODEL") or
         getattr(settings, "GEMINI_MODEL", None) or
+        os.getenv("OPENAI_MODEL") or
         getattr(settings, "OPENAI_MODEL", None) or
+        os.getenv("LLM_MODEL") or
         getattr(settings, "LLM_MODEL", None)
     )
-    if configured:
+    # Only use a configured value if it is not a placeholder default
+    if configured and configured not in ("gpt-4o", "placeholder-key"):
         return configured
 
-    api_key = (
-        os.getenv("GEMINI_API_KEY") or
-        os.getenv("OPENAI_API_KEY") or
-        os.getenv("LLM_API_KEY") or ""
-    )
-    if api_key.startswith("AQ.") or api_key.startswith("AIza") or os.getenv("GEMINI_API_KEY"):
-        return "gemini-3.6-flash"
+    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+    if gemini_key:
+        return "gemini-2.0-flash"
     return "gpt-4o"
 
 
@@ -186,7 +209,8 @@ async def generate_chat_response(
             status_code=503,
             detail=(
                 "AI Service is unavailable: no valid LLM API key is configured on this server. "
-                "Set OPENAI_API_KEY in the Render environment variables."
+                "Set GEMINI_API_KEY (for Gemini) or OPENAI_API_KEY (for OpenAI) "
+                "in the Render environment variables."
             ),
         )
 

@@ -375,7 +375,7 @@ export default function AIAssistantPanel() {
               </span>
             </div>
             <span className="text-[10px] text-slate-400 block">
-              Model: <span className="text-cyan-400 font-medium">GPT-4o (OpenAI)</span>
+              Powered by <span className="text-cyan-400 font-medium">IPMCAS AI</span>
             </span>
           </div>
         </div>

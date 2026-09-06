@@ -19,11 +19,16 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str = "placeholder-service-role-key"
     
     # LLM Provider Configuration
+    # All keys here are read from Render environment variables via pydantic-settings.
+    # GEMINI_API_KEY takes priority when set; falls back to OPENAI_API_KEY, then LLM_API_KEY.
     LLM_PROVIDER: str = "openai"
     LLM_API_KEY: str = "placeholder-key"
     LLM_MODEL: str = "gpt-4o"
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: Optional[str] = None
+    # Gemini fields — must be declared here so pydantic-settings reads them from env
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_MODEL: Optional[str] = None
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000", "https://ipmcas-web.onrender.com"]
