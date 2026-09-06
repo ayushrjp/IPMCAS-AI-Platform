@@ -87,8 +87,12 @@ def get_model_name() -> str:
       1. GEMINI_MODEL env var (when using Gemini)
       2. OPENAI_MODEL / LLM_MODEL env var (generic override)
       3. Automatic default based on which key is active:
-         - GEMINI_API_KEY set  ->  gemini-2.0-flash  (stable, widely available Gemini model)
+         - GEMINI_API_KEY set  ->  gemini-3.5-flash  (verified working with Google AI Studio keys)
          - OPENAI_API_KEY set  ->  gpt-4o
+
+    Verified working Gemini models (with AQ. / Google AI Studio keys):
+      gemini-3.5-flash, gemini-3.6-flash, gemini-flash-latest
+    NOT available (404): gemini-2.0-flash, gemini-2.5-flash, gemini-1.5-flash, gemini-1.5-pro
     """
     configured = (
         os.getenv("GEMINI_MODEL") or
@@ -104,8 +108,26 @@ def get_model_name() -> str:
 
     gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
     if gemini_key:
-        return "gemini-2.0-flash"
+        return "gemini-3.5-flash"
     return "gpt-4o"
+
+
+def log_llm_config() -> None:
+    """Logs the current LLM configuration state at startup (no secrets)."""
+    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+    openai_key = os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", None)
+    model = get_model_name()
+    provider = "gemini" if gemini_key else ("openai" if openai_key else "NONE")
+    logger.info(
+        "[LLM CONFIG] provider=%s configured=%s model=%s gemini_key_set=%s openai_key_set=%s",
+        provider,
+        "YES" if (gemini_key or openai_key) else "NO",
+        model,
+        "YES" if gemini_key else "NO",
+        "YES" if openai_key else "NO",
+    )
+
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────

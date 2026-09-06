@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.logging import logger
+from app.services.llm_service import log_llm_config
 from app.api.routes import (
     health,
     measurements,
@@ -28,6 +29,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Log LLM configuration on startup (no secrets)
+log_llm_config()
 
 # Include Routers under /api/v1
 app.include_router(health.router, prefix=settings.API_V1_STR)

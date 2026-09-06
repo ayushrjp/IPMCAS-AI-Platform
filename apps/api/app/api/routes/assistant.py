@@ -10,6 +10,8 @@ from app.services.llm_service import (
     generate_chat_response,
     generate_chat_response_stream,
     generate_insights,
+    get_openai_client,
+    get_model_name,
 )
 from app.services.supabase_db import (
     get_measurement_by_id,
@@ -18,7 +20,33 @@ from app.services.supabase_db import (
     get_ai_conversations
 )
 
+import os
+
 router = APIRouter(prefix="/assistant", tags=["AI Assistant"])
+
+
+@router.get("/config")
+async def assistant_config():
+    """
+    Safe diagnostic endpoint: reports AI provider configuration state.
+    Does NOT expose API keys — only reports YES/NO and model name.
+    """
+    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+    openai_key = os.getenv("OPENAI_API_KEY") or getattr(settings, "OPENAI_API_KEY", None)
+    invalid = {"placeholder-key", "your_openai_api_key_here", "sk-placeholder",
+               "your-llm-api-key-here", "placeholder-service-role-key", ""}
+    gemini_configured = bool(gemini_key and gemini_key.strip() not in invalid)
+    openai_configured = bool(openai_key and openai_key.strip() not in invalid)
+    client = get_openai_client()
+    model = get_model_name()
+    return {
+        "gemini_api_key_configured": gemini_configured,
+        "openai_api_key_configured": openai_configured,
+        "llm_client_ready": client is not None,
+        "active_model": model,
+        "provider": "gemini" if gemini_configured else ("openai" if openai_configured else "none"),
+        "base_url": str(client.base_url) if client else None,
+    }
 
 
 class ChatMessage(BaseModel):
