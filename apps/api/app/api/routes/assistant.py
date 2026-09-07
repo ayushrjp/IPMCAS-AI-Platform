@@ -20,6 +20,7 @@ from app.services.supabase_db import (
     get_ai_conversations
 )
 
+import asyncio
 import os
 
 router = APIRouter(prefix="/assistant", tags=["AI Assistant"])
@@ -122,8 +123,7 @@ async def resolve_measurement_and_history(
     payload: AssistantChatRequest,
     user_id: Optional[str]
 ) -> tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
-    """Helper to retrieve primary measurement context and historical baseline securely."""
-    target_measurement = None
+    """Helper to retrieve primary measurement context and historical baseline securely and concurrently."""
     target_id = payload.measurement_id
 
     if not target_id and payload.context_override and isinstance(payload.context_override, dict):
@@ -134,10 +134,20 @@ async def resolve_measurement_and_history(
             payload.context_override.get("session_id")
         )
 
-    if target_id and user_id:
-        target_measurement = await get_measurement_by_id(str(target_id), user_id)
-        if not target_measurement and not payload.context_override:
+    async def fetch_target():
+        if target_id and user_id:
+            m = await get_measurement_by_id(str(target_id), user_id)
+            if m:
+                return m
             logger.info(f"Target measurement {target_id} not found for user {user_id}")
+        return None
+
+    async def fetch_history():
+        if user_id:
+            return await get_user_historical_summary(user_id)
+        return {"total_tests": 0}
+
+    target_measurement, historical_summary = await asyncio.gather(fetch_target(), fetch_history())
 
     if not target_measurement and payload.context_override and isinstance(payload.context_override, dict):
         lat_dict = payload.context_override.get("latency") if isinstance(payload.context_override.get("latency"), dict) else {}
@@ -172,7 +182,6 @@ async def resolve_measurement_and_history(
             "client_info": payload.context_override.get("client_info") or {}
         }
 
-    historical_summary = await get_user_historical_summary(user_id) if user_id else {"total_tests": 0}
     return target_measurement, historical_summary
 
 
@@ -209,8 +218,10 @@ async def assistant_chat(
 
     # Persist in Supabase if authenticated
     if user_id:
-        await save_ai_conversation(user_id, payload.session_id, "user", payload.message)
-        await save_ai_conversation(user_id, payload.session_id, "assistant", answer_text)
+        await asyncio.gather(
+            save_ai_conversation(user_id, payload.session_id, "user", payload.message),
+            save_ai_conversation(user_id, payload.session_id, "assistant", answer_text)
+        )
 
     suggested = get_suggested_questions(target_measurement)
 
