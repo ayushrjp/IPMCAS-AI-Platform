@@ -98,10 +98,11 @@ def extract_upload_speed(r: Dict[str, Any]) -> float:
     actual_duration = r.get("actual_duration_s", 10.0) or 10.0
     
     if bytes_transferred > 0 and throughput_mbps > 0:
-        est_dl_bytes = (throughput_mbps * 1_000_000 / 8.0) * min(10.0, actual_duration / 2.0)
+        est_dl_duration = min(10.0, actual_duration / 2.0)
+        est_dl_bytes = (throughput_mbps * 1_000_000 / 8.0) * est_dl_duration
         est_ul_bytes = max(0, bytes_transferred - est_dl_bytes)
         if est_ul_bytes > 0:
-            est_ul_duration = max(1.0, actual_duration / 2.0)
+            est_ul_duration = max(1.0, actual_duration - est_dl_duration)
             est_ul_mbps = round((est_ul_bytes * 8.0) / (1_000_000 * est_ul_duration), 2)
             if est_ul_mbps > 0:
                 return est_ul_mbps

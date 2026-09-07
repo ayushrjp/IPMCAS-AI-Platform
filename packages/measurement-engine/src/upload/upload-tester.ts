@@ -58,9 +58,12 @@ export class UploadTester {
       }
     }, 100);
 
-    // 512KB payload chunk per POST request for smooth streaming transfers
-    const chunkSize = 512 * 1024;
+    // 64KB payload chunk per POST request for high temporal precision and reliability on all connections
+    const chunkSize = 64 * 1024;
     const payloadChunk = this.generatePayloadChunk(chunkSize);
+    const payloadBlob = typeof Blob !== 'undefined'
+      ? new Blob([payloadChunk.buffer as ArrayBuffer], { type: 'application/octet-stream' })
+      : payloadChunk;
 
     const uploadPromises = Array.from({ length: concurrencyLevel }).map(async (_, streamIndex) => {
       let chunkSeq = 0;
@@ -77,7 +80,7 @@ export class UploadTester {
             headers: {
               'Content-Type': 'application/octet-stream',
             },
-            body: payloadChunk as unknown as BodyInit,
+            body: payloadBlob as unknown as BodyInit,
             signal: abortController.signal,
           });
 
