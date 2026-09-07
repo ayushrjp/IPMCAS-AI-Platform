@@ -234,9 +234,10 @@ export default function AIAssistantPanel() {
 
     try {
       let accumulatedText = '';
+      let streamCompleted = false;
 
       try {
-        await api.askAssistantStream(
+        const streamResult = await api.askAssistantStream(
           promptText,
           (chunk: string) => {
             accumulatedText += chunk;
@@ -250,12 +251,15 @@ export default function AIAssistantPanel() {
           ctx,
           targetId || undefined
         );
+        if (streamResult?.completed) {
+          streamCompleted = true;
+        }
       } catch (streamErr) {
-        console.warn('SSE streaming endpoint unreachable, falling back to standard AI chat endpoint:', streamErr);
+        console.warn('SSE streaming incomplete or interrupted, falling back to standard AI chat endpoint:', streamErr);
       }
 
-      if (!accumulatedText.trim()) {
-        // Fallback to non-streaming if stream produced no output or endpoint was 404
+      if (!streamCompleted || !accumulatedText.trim()) {
+        // Fallback to non-streaming if stream produced no output, was interrupted, or failed [DONE] signal
         const res = await api.askAssistant(promptText, ctx, targetId || undefined, historyPayload);
         const finalAnswer = res.answer || res.observation || 'Analysis complete.';
         setMessages(prev =>

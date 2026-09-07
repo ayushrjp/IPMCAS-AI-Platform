@@ -262,7 +262,7 @@ async def generate_chat_response(
             model=get_model_name(),
             messages=formatted,
             temperature=0.4,
-            max_tokens=600,
+            max_tokens=1500,
         )
         answer = response.choices[0].message.content or "I could not generate a response."
         logger.info("[LLM FLOW] <- OpenAI | answer_len=%d chars", len(answer))
@@ -323,7 +323,7 @@ async def generate_chat_response_stream(
             model=get_model_name(),
             messages=formatted,
             temperature=0.4,
-            max_tokens=600,
+            max_tokens=1500,
             stream=True,
         )
         chunk_count = 0

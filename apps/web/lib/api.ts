@@ -340,7 +340,7 @@ export const api = {
     contextOverride?: any,
     measurementId?: string,
     sessionId?: string
-  ): Promise<void> {
+  ): Promise<{ completed: boolean; fullText: string }> {
     const { data: { session } } = await supabase.auth.getSession();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -369,9 +369,14 @@ export const api = {
 
     const reader = response.body?.getReader();
     const decoder = new TextDecoder('utf-8');
-    if (!reader) return;
+    if (!reader) {
+      throw new APIError('Response body stream unreadable.', 500);
+    }
 
     let buffer = '';
+    let fullText = '';
+    let completed = false;
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -383,18 +388,35 @@ export const api = {
         const trimmed = line.trim();
         if (trimmed.startsWith('data: ')) {
           const rawData = trimmed.replace('data: ', '').trim();
-          if (rawData === '[DONE]') return;
+          if (rawData === '[DONE]') {
+            completed = true;
+            return { completed: true, fullText };
+          }
           try {
             const parsed = JSON.parse(rawData);
+            if (parsed.error) {
+              throw new APIError(parsed.error, 502);
+            }
             if (parsed.content) {
+              fullText += parsed.content;
               onChunk(parsed.content);
             }
-          } catch {
-            if (rawData) onChunk(rawData);
+          } catch (e: any) {
+            if (e instanceof APIError) throw e;
+            if (rawData) {
+              fullText += rawData;
+              onChunk(rawData);
+            }
           }
         }
       }
     }
+
+    if (!completed) {
+      throw new APIError('Stream disconnected prematurely before completion signal.', 500);
+    }
+
+    return { completed: true, fullText };
   },
 
   /**
