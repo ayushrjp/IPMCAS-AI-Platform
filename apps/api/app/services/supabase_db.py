@@ -70,7 +70,7 @@ async def create_measurement_session(user_id: str, concurrency_level: int = 4, c
         }
     }
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code in (200, 201):
             records = response.json()
@@ -80,6 +80,33 @@ async def create_measurement_session(user_id: str, concurrency_level: int = 4, c
         else:
             logger.error(f"Failed to insert measurement session in Supabase: {response.status_code} {response.text}")
             raise Exception(f"Database session creation failed: {response.text}")
+
+def extract_upload_speed(r: Dict[str, Any]) -> float:
+    """
+    Extracts upload speed in Mbps from database record dict.
+    Returns stored upload_speed_mbps if present and > 0.
+    Otherwise estimates upload speed from total bytes_transferred and throughput_mbps for legacy records.
+    """
+    if not r:
+        return 0.0
+    ul_val = r.get("upload_speed_mbps")
+    if ul_val is not None and float(ul_val) > 0:
+        return round(float(ul_val), 2)
+    
+    bytes_transferred = r.get("bytes_transferred", 0) or 0
+    throughput_mbps = r.get("throughput_mbps", 0.0) or 0.0
+    actual_duration = r.get("actual_duration_s", 10.0) or 10.0
+    
+    if bytes_transferred > 0 and throughput_mbps > 0:
+        est_dl_bytes = (throughput_mbps * 1_000_000 / 8.0) * min(10.0, actual_duration / 2.0)
+        est_ul_bytes = max(0, bytes_transferred - est_dl_bytes)
+        if est_ul_bytes > 0:
+            est_ul_duration = max(1.0, actual_duration / 2.0)
+            est_ul_mbps = round((est_ul_bytes * 8.0) / (1_000_000 * est_ul_duration), 2)
+            if est_ul_mbps > 0:
+                return est_ul_mbps
+    
+    return 0.0
 
 async def save_measurement_result(session_id: str, user_id: str, payload: Any) -> Dict[str, Any]:
     """
@@ -108,6 +135,8 @@ async def save_measurement_result(session_id: str, user_id: str, payload: Any) -
     other_errors = getattr(req_stats, "otherHttpErrors", 0)
     exceptions = getattr(req_stats, "requestExceptions", 0)
     
+    upload_speed = getattr(payload, "uploadSpeedMbps", 0.0) or 0.0
+    
     db_payload = {
         "session_id": session_id,
         "user_id": user_id,
@@ -118,6 +147,7 @@ async def save_measurement_result(session_id: str, user_id: str, payload: Any) -
         "actual_duration_s": max(0.1, payload.durationSeconds),
         "bytes_transferred": payload.bytesDownloaded + payload.bytesUploaded,
         "throughput_mbps": payload.downloadSpeedMbps,
+        "upload_speed_mbps": upload_speed,
         "latency_min_ms": latency_min,
         "latency_avg_ms": latency_avg,
         "latency_median_ms": latency_median,
@@ -134,9 +164,16 @@ async def save_measurement_result(session_id: str, user_id: str, payload: Any) -
         "error": payload.error
     }
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         # Insert measurement_results record
         res_response = await client.post(url, headers=headers, json=db_payload)
+        if res_response.status_code not in (200, 201) and ("upload_speed_mbps" in res_response.text or "PGRST204" in res_response.text):
+            # Fallback if DB table column upload_speed_mbps has not been created yet in PostgREST cache
+            logger.warning("Supabase table missing 'upload_speed_mbps' column, retrying insertion without upload_speed_mbps field")
+            db_payload_copy = dict(db_payload)
+            del db_payload_copy["upload_speed_mbps"]
+            res_response = await client.post(url, headers=headers, json=db_payload_copy)
+
         if res_response.status_code not in (200, 201):
             logger.error(f"Failed to insert measurement result in Supabase: {res_response.status_code} {res_response.text}")
             raise Exception(f"Database insertion failed ({res_response.status_code}): {res_response.text}")
@@ -159,11 +196,10 @@ async def get_user_measurement_history(user_id: str, limit: int = 20, page: int 
     headers = get_headers()
     headers["Prefer"] = "count=exact"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.get(url, headers=headers)
-        if response.status_code == 200:
+        if response.status_code in (200, 206):
             records = response.json()
-            # Extract total count from Content-Range header if present e.g. "0-19/42"
             content_range = response.headers.get("Content-Range", "")
             total_records = len(records)
             if "/" in content_range:
@@ -172,9 +208,9 @@ async def get_user_measurement_history(user_id: str, limit: int = 20, page: int 
                 except ValueError:
                     pass
 
-            # Map DB fields to camelCase structure for frontend compatibility
             formatted_data = []
             for r in records:
+                ul_speed = extract_upload_speed(r)
                 formatted_data.append({
                     "id": r.get("id"),
                     "sessionId": r.get("session_id"),
@@ -185,7 +221,7 @@ async def get_user_measurement_history(user_id: str, limit: int = 20, page: int 
                     "bytesDownloaded": r.get("bytes_transferred"),
                     "bytesUploaded": 0,
                     "downloadSpeedMbps": r.get("throughput_mbps"),
-                    "uploadSpeedMbps": r.get("upload_speed_mbps", 0.0),
+                    "uploadSpeedMbps": ul_speed,
                     "latency": {
                         "minMs": r.get("latency_min_ms"),
                         "avgMs": r.get("latency_avg_ms"),
@@ -196,7 +232,7 @@ async def get_user_measurement_history(user_id: str, limit: int = 20, page: int 
                     "latency_avg_ms": r.get("latency_avg_ms"),
                     "jitter_ms": r.get("jitter_ms"),
                     "throughput_mbps": r.get("throughput_mbps"),
-                    "upload_speed_mbps": r.get("upload_speed_mbps"),
+                    "upload_speed_mbps": ul_speed,
                     "packetLossPercent": r.get("packet_loss_percent"),
                     "httpStatusCode": r.get("http_status"),
                     "status": r.get("status"),
@@ -221,7 +257,7 @@ async def get_measurement_by_id(measurement_id: str, user_id: str) -> Optional[D
     headers = get_headers()
     url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/measurement_results?or=(id.eq.{measurement_id},session_id.eq.{measurement_id})&user_id=eq.{user_id}&limit=1"
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200 and resp.json():
@@ -231,7 +267,7 @@ async def get_measurement_by_id(measurement_id: str, user_id: str) -> Optional[D
                     "session_id": r.get("session_id"),
                     "user_id": r.get("user_id"),
                     "download_mbps": r.get("throughput_mbps", 0.0),
-                    "upload_mbps": r.get("upload_speed_mbps", 0.0),
+                    "upload_mbps": extract_upload_speed(r),
                     "latency_ms": r.get("latency_avg_ms", 0.0),
                     "jitter_ms": r.get("jitter_ms", 0.0),
                     "status": r.get("status", "COMPLETED"),
@@ -249,7 +285,7 @@ async def get_user_historical_summary(user_id: str) -> Dict[str, Any]:
     headers = get_headers()
     url = f"{settings.SUPABASE_URL.rstrip('/')}/rest/v1/measurement_results?user_id=eq.{user_id}&order=created_at.desc&limit=10"
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         try:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 200 and resp.json():
@@ -259,7 +295,7 @@ async def get_user_historical_summary(user_id: str) -> Dict[str, Any]:
                     return {"total_tests": 0}
                 
                 total_dl = sum(r.get("throughput_mbps", 0.0) or 0.0 for r in valid)
-                total_ul = sum(r.get("upload_speed_mbps", 0.0) or 0.0 for r in valid)
+                total_ul = sum(extract_upload_speed(r) for r in valid)
                 total_lat = sum(r.get("latency_avg_ms", 0.0) or 0.0 for r in valid)
                 total_jit = sum(r.get("jitter_ms", 0.0) or 0.0 for r in valid)
                 n = len(valid)

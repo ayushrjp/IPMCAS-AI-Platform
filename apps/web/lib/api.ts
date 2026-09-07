@@ -148,36 +148,50 @@ export const api = {
       // Extract server ID or default server
       const { data: serverRec } = await supabase.from('test_servers').select('id').limit(1).single();
 
-      const { data: insertedRes, error: insErr } = await supabase
+      const insertPayload: any = {
+        session_id: sessionId,
+        user_id: user.id,
+        server_id: serverRec?.id || null,
+        test_type: resultData.testType || 'FULL',
+        concurrency: resultData.concurrencyLevel || 4,
+        configured_duration_s: 10.0,
+        actual_duration_s: Math.max(0.1, resultData.durationSeconds || 10.0),
+        bytes_transferred: (resultData.bytesDownloaded || 0) + (resultData.bytesUploaded || 0),
+        throughput_mbps: resultData.downloadSpeedMbps || 0.0,
+        upload_speed_mbps: resultData.uploadSpeedMbps || 0.0,
+        latency_min_ms: resultData.latency?.minMs || 0.0,
+        latency_avg_ms: resultData.latency?.avgMs || 0.0,
+        latency_median_ms: resultData.latency?.medianMs || 0.0,
+        latency_max_ms: resultData.latency?.maxMs || 0.0,
+        jitter_ms: resultData.latency?.jitterMs || 0.0,
+        packet_loss_percent: resultData.packetLossPercent || null,
+        total_requests: resultData.requestStatistics?.totalRequests || 0,
+        successful_requests: resultData.requestStatistics?.successfulRequests || 0,
+        rate_limited_requests: resultData.requestStatistics?.rateLimitedRequests || 0,
+        other_http_errors: resultData.requestStatistics?.otherHttpErrors || 0,
+        request_exceptions: resultData.requestStatistics?.requestExceptions || 0,
+        http_status: resultData.httpStatusCode || 200,
+        status: resultData.status || 'COMPLETED',
+        error: resultData.error || null
+      };
+
+      let { data: insertedRes, error: insErr } = await supabase
         .from('measurement_results')
-        .insert({
-          session_id: sessionId,
-          user_id: user.id,
-          server_id: serverRec?.id || null,
-          test_type: resultData.testType || 'FULL',
-          concurrency: resultData.concurrencyLevel || 4,
-          configured_duration_s: 10.0,
-          actual_duration_s: Math.max(0.1, resultData.durationSeconds || 10.0),
-          bytes_transferred: (resultData.bytesDownloaded || 0) + (resultData.bytesUploaded || 0),
-          throughput_mbps: resultData.downloadSpeedMbps || 0.0,
-          upload_speed_mbps: resultData.uploadSpeedMbps || 0.0,
-          latency_min_ms: resultData.latency?.minMs || 0.0,
-          latency_avg_ms: resultData.latency?.avgMs || 0.0,
-          latency_median_ms: resultData.latency?.medianMs || 0.0,
-          latency_max_ms: resultData.latency?.maxMs || 0.0,
-          jitter_ms: resultData.latency?.jitterMs || 0.0,
-          packet_loss_percent: resultData.packetLossPercent || null,
-          total_requests: resultData.requestStatistics?.totalRequests || 0,
-          successful_requests: resultData.requestStatistics?.successfulRequests || 0,
-          rate_limited_requests: resultData.requestStatistics?.rateLimitedRequests || 0,
-          other_http_errors: resultData.requestStatistics?.otherHttpErrors || 0,
-          request_exceptions: resultData.requestStatistics?.requestExceptions || 0,
-          http_status: resultData.httpStatusCode || 200,
-          status: resultData.status || 'COMPLETED',
-          error: resultData.error || null
-        })
+        .insert(insertPayload)
         .select()
         .single();
+
+      if (insErr && (insErr.message?.includes('upload_speed_mbps') || insErr.code === 'PGRST204')) {
+        console.warn('Supabase direct insert missing upload_speed_mbps column, retrying without upload_speed_mbps');
+        delete insertPayload.upload_speed_mbps;
+        const retryRes = await supabase
+          .from('measurement_results')
+          .insert(insertPayload)
+          .select()
+          .single();
+        insertedRes = retryRes.data;
+        insErr = retryRes.error;
+      }
 
       if (insErr) {
         console.error('Supabase direct result insert failed:', insErr);
@@ -230,34 +244,44 @@ export const api = {
         throw err;
       }
 
-      const formatted = (dbRecords || []).map((r: any) => ({
-        id: r.id,
-        sessionId: r.session_id,
-        userId: r.user_id,
-        testType: r.test_type,
-        concurrencyLevel: r.concurrency,
-        durationSeconds: r.actual_duration_s,
-        bytesDownloaded: r.bytes_transferred,
-        bytesUploaded: 0,
-        downloadSpeedMbps: r.throughput_mbps,
-        uploadSpeedMbps: r.upload_speed_mbps || 0.0,
-        latency: {
-          minMs: r.latency_min_ms,
-          avgMs: r.latency_avg_ms,
-          medianMs: r.latency_median_ms,
-          maxMs: r.latency_max_ms,
-          jitterMs: r.jitter_ms
-        },
-        latency_avg_ms: r.latency_avg_ms,
-        jitter_ms: r.jitter_ms,
-        throughput_mbps: r.throughput_mbps,
-        upload_speed_mbps: r.upload_speed_mbps,
-        packetLossPercent: r.packet_loss_percent,
-        httpStatusCode: r.http_status,
-        status: r.status,
-        error: r.error,
-        timestamp: r.created_at || r.timestamp
-      }));
+      const formatted = (dbRecords || []).map((r: any) => {
+        let ulSpeed = r.upload_speed_mbps || 0.0;
+        if (!ulSpeed && r.bytes_transferred && r.throughput_mbps) {
+          const estDl = (r.throughput_mbps * 1000000 / 8) * Math.min(10, (r.actual_duration_s || 10) / 2);
+          const estUl = Math.max(0, r.bytes_transferred - estDl);
+          if (estUl > 0) {
+            ulSpeed = Math.round((estUl * 8) / (1000000 * Math.max(1, (r.actual_duration_s || 10) / 2)) * 100) / 100;
+          }
+        }
+        return {
+          id: r.id,
+          sessionId: r.session_id,
+          userId: r.user_id,
+          testType: r.test_type,
+          concurrencyLevel: r.concurrency,
+          durationSeconds: r.actual_duration_s,
+          bytesDownloaded: r.bytes_transferred,
+          bytesUploaded: 0,
+          downloadSpeedMbps: r.throughput_mbps,
+          uploadSpeedMbps: ulSpeed,
+          latency: {
+            minMs: r.latency_min_ms,
+            avgMs: r.latency_avg_ms,
+            medianMs: r.latency_median_ms,
+            maxMs: r.latency_max_ms,
+            jitterMs: r.jitter_ms
+          },
+          latency_avg_ms: r.latency_avg_ms,
+          jitter_ms: r.jitter_ms,
+          throughput_mbps: r.throughput_mbps,
+          upload_speed_mbps: ulSpeed,
+          packetLossPercent: r.packet_loss_percent,
+          httpStatusCode: r.http_status,
+          status: r.status,
+          error: r.error,
+          timestamp: r.created_at || r.timestamp
+        };
+      });
 
       return {
         page,
