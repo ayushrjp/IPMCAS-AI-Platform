@@ -24,6 +24,7 @@ CRITICAL RULES:
 4. NO HALLUCINATIONS. Never claim a technical cause (e.g., TCP window scaling, ISP routing, Wi-Fi interference, server congestion, packet loss) was actually measured unless it explicitly appears in the data. Treat these ONLY as "possible causes".
 5. 0 UPLOAD HANDLING: If upload is 0 Mbps, check the 'Status'. It might mean a failed test, a timeout, or a duration limit reached, rather than a genuine 0 Mbps capability. Mention this if explaining 0 upload.
 6. CONCISE RESPONSE: Keep answers to 3-6 sentences unless providing a structured comparison. Do not generate essays.
+7. COMPLETE SENTENCES: Always end your response with a complete, grammatically correct sentence. Never terminate generation in the middle of a word or clause.
 
 REQUIRED REASONING STRUCTURE:
 When answering diagnostic or "why" questions (e.g., "Why is my jitter high?", "Is this good for gaming?"), structure your answer logically:
@@ -262,7 +263,7 @@ async def generate_chat_response(
             model=get_model_name(),
             messages=formatted,
             temperature=0.4,
-            max_tokens=1500,
+            max_tokens=2000,
         )
         answer = response.choices[0].message.content or "I could not generate a response."
         logger.info("[LLM FLOW] <- OpenAI | answer_len=%d chars", len(answer))
@@ -323,7 +324,7 @@ async def generate_chat_response_stream(
             model=get_model_name(),
             messages=formatted,
             temperature=0.4,
-            max_tokens=1500,
+            max_tokens=2000,
             stream=True,
         )
         chunk_count = 0
