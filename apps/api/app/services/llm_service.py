@@ -91,13 +91,7 @@ def get_model_name() -> str:
     Resolution order:
       1. GEMINI_MODEL env var (when using Gemini)
       2. OPENAI_MODEL / LLM_MODEL env var (generic override)
-      3. Automatic default based on which key is active:
-         - GEMINI_API_KEY set  ->  gemini-3.5-flash  (verified working with Google AI Studio keys)
-         - OPENAI_API_KEY set  ->  gpt-4o
-
-    Verified working Gemini models (with AQ. / Google AI Studio keys):
-      gemini-3.5-flash, gemini-3.6-flash, gemini-flash-latest
-    NOT available (404): gemini-2.0-flash, gemini-2.5-flash, gemini-1.5-flash, gemini-1.5-pro
+      3. Automatic default based on active key (gemini-3.6-flash for Gemini)
     """
     configured = (
         os.getenv("GEMINI_MODEL") or
@@ -107,13 +101,18 @@ def get_model_name() -> str:
         os.getenv("LLM_MODEL") or
         getattr(settings, "LLM_MODEL", None)
     )
-    # Only use a configured value if it is not a placeholder default
+    
+    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
+
+    # Auto-remap deprecated/outdated Gemini model names to the active gemini-3.6-flash
+    if gemini_key:
+        if not configured or configured in ("gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash", "gpt-4o", "placeholder-key"):
+            return "gemini-3.6-flash"
+        return configured
+
     if configured and configured not in ("gpt-4o", "placeholder-key"):
         return configured
 
-    gemini_key = os.getenv("GEMINI_API_KEY") or getattr(settings, "GEMINI_API_KEY", None)
-    if gemini_key:
-        return "gemini-3.5-flash"
     return "gpt-4o"
 
 
